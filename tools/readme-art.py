@@ -193,7 +193,7 @@ def hero():
 
   <text x="62" y="222" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">XRPL history</text>
   <text x="62" y="282" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">you can check yourself</text>
-  <text x="64" y="326" class="sans" font-size="16" fill="{MUTED}">A Clio-compatible history server with proofs backed by validator signatures.</text>
+  <text x="64" y="326" class="sans" font-size="16" fill="{MUTED}">The XRPL history server that doesn&#8217;t ask you to trust it.</text>
   {''.join(stat_svg)}
 </svg>
 """

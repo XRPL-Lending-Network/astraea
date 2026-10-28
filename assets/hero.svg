@@ -48,6 +48,6 @@
 
   <text x="62" y="222" class="serif" font-size="54" fill="#f5f5f4" letter-spacing="-.5">XRPL history</text>
   <text x="62" y="282" class="serif" font-size="54" fill="#f5f5f4" letter-spacing="-.5">you can check yourself</text>
-  <text x="64" y="326" class="sans" font-size="16" fill="#8b8b8b">A Clio-compatible history server with proofs backed by validator signatures.</text>
+  <text x="64" y="326" class="sans" font-size="16" fill="#8b8b8b">The XRPL history server that doesn&#8217;t ask you to trust it.</text>
   <text x="64" y="414" class="sans" font-size="13" fill="#8b8b8b">History from ledger</text><text x="64" y="440" class="sans" font-size="20" fill="#f5f5f4">32,571</text><text x="242" y="414" class="sans" font-size="13" fill="#8b8b8b">Confirmed by</text><text x="242" y="440" class="sans" font-size="20" fill="#f5f5f4">80% of the UNL</text><text x="420" y="414" class="sans" font-size="13" fill="#8b8b8b">Cold storage</text><text x="420" y="440" class="sans" font-size="20" fill="#f5f5f4">~240 B / tx</text>
 </svg>
