@@ -4,6 +4,8 @@
 
 - `account_tx` over cold history reads only headers and transactions, not state changes, and prepares the blocks a page needs in parallel. In the Clio comparison benchmark p99 for a 200-transaction page went from 4.2 s to 660 ms.
 - Cold segments carry a seal (`cold-F.seal`): each block gets its full check once, when the segment is written, instead of on every load. `astraea-state history-cold-seal` seals older segments. With it, account_tx p99 is 383 ms and 16 clients get 234 requests per second, up from 39.
+- `server_info` no longer waits for the node: the node's `load_factor` and version are refreshed in the background.
+- One byte budget for the whole cold block cache instead of a fixed share per segment, and `TransactionIndex` read straight from the metadata header. On a real client's traffic `account_tx` p99 went from 16.7 ms to 5.3 ms (Clio: 7.2 to 8.8 ms).
 - The XRPLA client retries dropped connections and 5xx answers with a growing pause.
 - The full-history loader locks each chunk, gives each process its own temporary archive, and refuses a chunk with fewer ledgers than asked.
 
