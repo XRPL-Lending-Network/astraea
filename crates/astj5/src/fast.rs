@@ -60,6 +60,28 @@ fn bytes(pool: &[u8], atom: Atom) -> Res<&[u8]> {
     pool.get(atom.at as usize..atom.at as usize + (atom.len & !FIXED) as usize)
         .ok_or("atom extent".into())
 }
+/// Hasher for the compiler's field cache, keyed by pairs of small indexes.
+/// SipHash took a quarter of block preparation; the keys come from the block
+/// being read, so a multiplicative mix is enough. Added during integration.
+#[derive(Default, Clone, Copy)]
+struct PairHasher(u64);
+impl std::hash::Hasher for PairHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+}
+type PairMap<V> = HashMap<(usize, usize), V, std::hash::BuildHasherDefault<PairHasher>>;
 /// Prepared block: shared literal arena plus flat document instructions.
 /// Preparing does not itself authenticate the archive or recompute ledger roots.
 pub struct Prepared {
@@ -281,7 +303,7 @@ impl Prepared {
             contexts: &'a [usize],
             columns: &'a mut [Column],
             at: usize,
-            cache: HashMap<(usize, usize), Atom>,
+            cache: PairMap<Atom>,
             atoms: Vec<Atom>,
             docs: Vec<Doc>,
             tree: Vec<Atom>,
@@ -393,7 +415,7 @@ impl Prepared {
             contexts: &contexts,
             columns: &mut columns,
             at: 0,
-            cache: HashMap::new(),
+            cache: PairMap::default(),
             atoms: vec![],
             docs: vec![],
             tree: vec![],

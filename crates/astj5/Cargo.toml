@@ -6,7 +6,8 @@
 # 7838927). Added during integration: src/pool.rs (a pool of prepared blocks
 # for serving), the `pub mod pool;` line in lib.rs, and two read methods in
 # src/fast.rs (`Prepared::header` and `Prepared::row_txs`) that decode part of
-# a row. The format and the rest of the modules are unchanged.
+# a row, and a faster hasher for the field cache in `Prepared::parse_mode`. The
+# format and the rest of the modules are unchanged.
 # This is a research format: the production version and its compatibility
 # rules will be fixed separately.
 [package]
