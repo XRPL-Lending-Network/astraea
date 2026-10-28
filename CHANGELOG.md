@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `account_tx` over cold history reads only headers and transactions, not state changes, and prepares the blocks a page needs in parallel. In the Clio comparison benchmark p99 for a 200-transaction page went from 4.2 s to 660 ms.
+- The XRPLA client retries dropped connections and 5xx answers with a growing pause.
+- The full-history loader locks each chunk, gives each process its own temporary archive, and refuses a chunk with fewer ledgers than asked.
+
 ## 0.1.0
 
 First version in this repository.
