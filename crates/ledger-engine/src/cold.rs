@@ -24,9 +24,11 @@
 //! header chain are checked. A segment's cache holds `BLOCK_BUDGET` bytes of blocks,
 //! different blocks are prepared in parallel (at most `PREPARES` at once), and a
 //! block wanted by concurrent requests is prepared only once. At most `COLD_OPEN`
-//! segments are open; the least recently read ones are closed.
+//! segments are open; the least recently read ones are closed. A request for
+//! many ledgers at once (`Cold::ledgers`) reads them block by block on up to
+//! `COLD_READERS` threads.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -71,9 +73,14 @@ impl Default for BlockLimit {
 pub const COLD_OPEN: usize = 16;
 /// Byte budget for prepared blocks in an open segment's cache (codec
 /// estimate), and the number of concurrent prepares per segment. Together
-/// with `COLD_OPEN` this caps the cold cache at about 1 GiB.
+/// with `COLD_OPEN` this caps the cold cache at about 1 GiB. A block takes
+/// about 30 ms to prepare, and one account_tx page can need dozens of blocks
+/// from a single segment, so a segment prepares as many at once as one
+/// request reads in parallel.
 pub const BLOCK_BUDGET: usize = 64 << 20;
-pub const PREPARES: usize = 2;
+pub const PREPARES: usize = COLD_READERS;
+/// Threads one `Cold::ledgers` call reads with.
+pub const COLD_READERS: usize = 8;
 /// Maximum change kinds in a segment: checked before allocating memory.
 const MAX_CHANGES: u64 = 1 << 32;
 
@@ -663,6 +670,72 @@ impl Cold {
         seg.header(&o, seq).map(Some)
     }
 
+    /// Several ledgers without changes; those not in cold history are left
+    /// out. Ledgers of one block go to one reader, so the block is prepared
+    /// once, and different blocks are read on up to `COLD_READERS` threads.
+    pub fn ledgers(&self, seqs: &[u32]) -> Res<HashMap<u32, Ledger>> {
+        type Group = (Arc<ColdSegment>, Arc<Open>, Vec<u32>);
+        let mut open: HashMap<usize, Arc<Open>> = HashMap::new();
+        let mut blocks: BTreeMap<(usize, usize), Vec<u32>> = BTreeMap::new();
+        for &seq in seqs {
+            let Some(i) = self.find(seq) else { continue };
+            self.segments[i].check(seq, false)?;
+            let o = match open.get(&i) {
+                Some(o) => o,
+                None => {
+                    let (_, o) = self.open_segment(i)?;
+                    open.entry(i).or_insert(o)
+                }
+            };
+            let b = o.pool.block_id(seq).map_err(corrupt)?;
+            blocks.entry((i, b)).or_default().push(seq);
+        }
+        let groups: Vec<Group> = blocks
+            .into_iter()
+            .map(|((i, _), seqs)| (self.segments[i].clone(), open[&i].clone(), seqs))
+            .collect();
+        let read = |(seg, o, seqs): &Group| -> Res<Vec<(u32, Ledger)>> {
+            seqs.iter()
+                .map(|&seq| Ok((seq, seg.read(o, seq, false)?)))
+                .collect()
+        };
+        let mut out = HashMap::with_capacity(seqs.len());
+        if groups.len() <= 1 {
+            for g in &groups {
+                out.extend(read(g)?);
+            }
+            return Ok(out);
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let parts = std::thread::scope(|sc| {
+            let workers: Vec<_> = (0..COLD_READERS.min(groups.len()))
+                .map(|_| {
+                    sc.spawn(|| -> Res<Vec<(u32, Ledger)>> {
+                        let mut got = Vec::new();
+                        loop {
+                            let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(g) = groups.get(k) else {
+                                return Ok(got);
+                            };
+                            got.extend(read(g)?);
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| {
+                    w.join()
+                        .unwrap_or_else(|_| Err("cold reader panicked".into()))
+                })
+                .collect::<Vec<_>>()
+        });
+        for p in parts {
+            out.extend(p?);
+        }
+        Ok(out)
+    }
+
     fn open_segment(&self, i: usize) -> Res<(&Arc<ColdSegment>, Arc<Open>)> {
         let seg = &self.segments[i];
         // Open budget: a slot is freed and the segment is opened under the
@@ -769,6 +842,29 @@ pub(crate) mod tests {
             let seq = l.header().unwrap().sequence;
             assert_eq!(cold.ledger(seq, true).unwrap().unwrap(), *l);
         }
+    }
+
+    #[test]
+    fn ledgers_read_in_parallel_match_single_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = BlockLimit {
+            ledgers: 3,
+            raw: 1 << 20,
+        };
+        for f in [100u32, 120, 140] {
+            write_with(dir.path(), &chain(f, 12), Kinds::Explicit, small).unwrap();
+        }
+        let cold = Cold::open(dir.path()).unwrap().with_open_limit(2);
+        let seqs: Vec<u32> = vec![150, 149, 141, 130, 125, 111, 104, 103, 99, 115];
+        let got = cold.ledgers(&seqs).unwrap();
+        assert_eq!(got.len(), 8);
+        assert!(!got.contains_key(&99) && !got.contains_key(&115));
+        for (seq, l) in &got {
+            assert_eq!(*l, cold.ledger(*seq, false).unwrap().unwrap());
+            assert!(l.changes.is_empty());
+        }
+        assert!(cold.open_count() <= 2);
+        assert!(cold.ledgers(&[]).unwrap().is_empty());
     }
 
     #[test]

@@ -89,6 +89,10 @@ impl Pool {
             .map(|s| s.bytes)
             .sum()
     }
+    /// Index of the block holding ledger `seq`: callers group reads by it.
+    pub fn block_id(&self, seq: u32) -> Res<usize> {
+        self.block_of(seq)
+    }
     fn block_of(&self, seq: u32) -> Res<usize> {
         let i = self
             .entries

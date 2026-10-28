@@ -906,11 +906,26 @@ impl Engine {
             },
         };
         let binary = as_bool(p.get("binary"));
+        // Cold ledgers of the page are read up front, block by block in parallel:
+        // one by one, every block costs a full prepare in turn.
+        let hot_first = self.hot_first()?;
+        let mut cold_seqs: Vec<u32> = page
+            .transactions
+            .iter()
+            .map(|t| t.at.ledger)
+            .filter(|&s| s < hot_first)
+            .collect();
+        cold_seqs.dedup();
+        let mut cold = self.blocks.cold_txs(&cold_seqs).map_err(internal)?;
         let mut out = Vec::with_capacity(page.transactions.len());
         let mut cache: Option<(u32, Ledger)> = None;
         for t in &page.transactions {
             if cache.as_ref().is_none_or(|(s, _)| *s != t.at.ledger) {
-                cache = Some((t.at.ledger, self.ledger(t.at.ledger)?));
+                let l = match cold.remove(&t.at.ledger) {
+                    Some(l) => l,
+                    None => self.ledger(t.at.ledger)?,
+                };
+                cache = Some((t.at.ledger, l));
             }
             let Some((_, l)) = &cache else { continue };
             // Cold indexes don't know the position in the ledger, so look it up by
