@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" width="1000" height="520" role="img" aria-labelledby="t d">
+  <title id="t">How Astraea fits together</title>
+  <desc id="d">Ledgers come from xrpld and the XRPLA archive, validations and UNL lists come from the network. The Ledger Engine checks and stores ledgers, the Proof Engine confirms them by validator quorum, and both feed the Clio-compatible API and the Proof API.</desc>
+  <style>
+    .bg { fill: #f6f8fb; }
+    .box { fill: #ffffff; stroke: #c9d3e3; stroke-width: 1.2; }
+    .core { fill: #eef4ff; stroke: #2f6fec; stroke-width: 1.6; }
+    .out { fill: #fff8e8; stroke: #d69e2e; stroke-width: 1.6; }
+    .h { fill: #0f1b2d; font: 600 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .s { fill: #51607a; font: 400 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .cap { fill: #51607a; font: 600 11px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: 1.5px; }
+    .wire { stroke: #9fb0cc; stroke-width: 1.4; fill: none; }
+    .dot { fill: #2f6fec; }
+    .sig { fill: #f0b429; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0b1220; }
+      .box { fill: #111b2e; stroke: #2a3a57; }
+      .core { fill: #12213d; stroke: #7aa7ff; }
+      .out { fill: #2a2112; stroke: #e0b44c; }
+      .h { fill: #eef3ff; }
+      .s, .cap { fill: #9fb0cc; }
+      .wire { stroke: #3c5076; }
+      .dot { fill: #7aa7ff; }
+    }
+  </style>
+
+  <rect class="bg" width="1000" height="520" rx="16"/>
+
+  <text class="cap" x="40" y="44">SOURCES</text>
+  <text class="cap" x="370" y="44">ASTRAEA</text>
+  <text class="cap" x="760" y="44">CLIENTS SEE</text>
+
+  <!-- Sources -->
+  <rect class="box" x="40" y="64" width="250" height="72" rx="10"/>
+  <text class="h" x="58" y="94">xrpld (gRPC)</text>
+  <text class="s" x="58" y="116">validated ledgers with state changes</text>
+
+  <rect class="box" x="40" y="160" width="250" height="72" rx="10"/>
+  <text class="h" x="58" y="190">XRPLA archive</text>
+  <text class="s" x="58" y="212">full history from ledger 32571</text>
+
+  <rect class="box" x="40" y="284" width="250" height="72" rx="10"/>
+  <text class="h" x="58" y="314">Validations stream</text>
+  <text class="s" x="58" y="336">signed votes from validators</text>
+
+  <rect class="box" x="40" y="380" width="250" height="72" rx="10"/>
+  <text class="h" x="58" y="410">UNL publishers</text>
+  <text class="s" x="58" y="432">vl.ripple.com, unl.xrplf.org</text>
+
+  <!-- Core -->
+  <rect class="core" x="370" y="64" width="290" height="168" rx="12"/>
+  <text class="h" x="390" y="94">Ledger Engine</text>
+  <text class="s" x="390" y="120">tx tree must match the header root</text>
+  <text class="s" x="390" y="140">parent hash chain, state root per ledger</text>
+  <text class="s" x="390" y="168">hot history: recent ledgers + state</text>
+  <text class="s" x="390" y="188">cold history: ASTJ5 segments,</text>
+  <text class="s" x="390" y="208">~240 bytes per transaction</text>
+
+  <rect class="core" x="370" y="284" width="290" height="168" rx="12"/>
+  <text class="h" x="390" y="314">Proof Engine</text>
+  <text class="s" x="390" y="340">every signature checked on arrival</text>
+  <text class="s" x="390" y="360">UNL in force at that ledger's time</text>
+  <text class="s" x="390" y="388">80% of the full UNL, every list</text>
+  <text class="s" x="390" y="408">combination, or not confirmed</text>
+
+  <!-- Outputs -->
+  <rect class="out" x="760" y="104" width="200" height="96" rx="10"/>
+  <text class="h" x="778" y="134">Clio-compatible API</text>
+  <text class="s" x="778" y="156">JSON-RPC + WebSocket</text>
+  <text class="s" x="778" y="176">tx, account_tx, ledger, …</text>
+
+  <rect class="out" x="760" y="320" width="200" height="96" rx="10"/>
+  <text class="h" x="778" y="350">Proof API</text>
+  <text class="s" x="778" y="372">evidence packages anyone</text>
+  <text class="s" x="778" y="392">can verify offline</text>
+
+  <!-- Wires -->
+  <path id="w1" class="wire" d="M290 100 C330 100 330 120 370 120"/>
+  <path id="w2" class="wire" d="M290 196 C330 196 330 176 370 176"/>
+  <path id="w3" class="wire" d="M290 320 C330 320 330 340 370 340"/>
+  <path id="w4" class="wire" d="M290 416 C330 416 330 396 370 396"/>
+  <path id="w5" class="wire" d="M515 284 L515 232"/>
+  <path id="w6" class="wire" d="M660 148 C710 148 710 152 760 152"/>
+  <path id="w7" class="wire" d="M660 368 C710 368 710 368 760 368"/>
+  <path id="w8" class="wire" d="M600 232 C650 280 700 300 760 340"/>
+
+  <!-- Moving data -->
+  <circle class="dot" r="4"><animateMotion dur="2.2s" repeatCount="indefinite"><mpath href="#w1"/></animateMotion></circle>
+  <circle class="dot" r="4"><animateMotion dur="3.1s" begin=".7s" repeatCount="indefinite"><mpath href="#w2"/></animateMotion></circle>
+  <circle class="sig" r="4"><animateMotion dur="1.6s" repeatCount="indefinite"><mpath href="#w3"/></animateMotion></circle>
+  <circle class="sig" r="4"><animateMotion dur="1.6s" begin=".5s" repeatCount="indefinite"><mpath href="#w3"/></animateMotion></circle>
+  <circle class="sig" r="4"><animateMotion dur="1.6s" begin="1.0s" repeatCount="indefinite"><mpath href="#w3"/></animateMotion></circle>
+  <circle class="dot" r="4"><animateMotion dur="4s" begin="1.2s" repeatCount="indefinite"><mpath href="#w4"/></animateMotion></circle>
+  <circle class="sig" r="4"><animateMotion dur="1.8s" begin=".3s" repeatCount="indefinite"><mpath href="#w5"/></animateMotion></circle>
+  <circle class="dot" r="4"><animateMotion dur="1.4s" repeatCount="indefinite"><mpath href="#w6"/></animateMotion></circle>
+  <circle class="dot" r="4"><animateMotion dur="1.4s" begin=".7s" repeatCount="indefinite"><mpath href="#w6"/></animateMotion></circle>
+  <circle class="sig" r="4"><animateMotion dur="2s" begin=".4s" repeatCount="indefinite"><mpath href="#w7"/></animateMotion></circle>
+  <circle class="dot" r="4"><animateMotion dur="2.6s" begin="1s" repeatCount="indefinite"><mpath href="#w8"/></animateMotion></circle>
+</svg>

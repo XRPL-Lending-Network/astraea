@@ -1,0 +1,21 @@
+[package]
+name = "witness-store"
+description = "Archive storage: segments, hash chain, merging of sources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+witness-core.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

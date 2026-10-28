@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" width="1000" height="300" role="img" aria-labelledby="t d">
+  <title id="t">What an evidence package proves</title>
+  <desc id="d">Validator signatures fill a quorum meter past 80 percent for an anchor ledger. A chain of parent hashes links the target ledger to the anchor, and a path in the transaction tree links the transaction to the target ledger header.</desc>
+  <style>
+    .bg { fill: #f6f8fb; }
+    .panel { fill: #ffffff; stroke: #c9d3e3; stroke-width: 1.2; }
+    .h { fill: #0f1b2d; font: 600 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .s { fill: #51607a; font: 400 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .m { fill: #2f6fec; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .track { fill: #e4e9f2; }
+    .fill { fill: #2f6fec; }
+    .mark { stroke: #d14343; stroke-width: 2; stroke-dasharray: 3 3; }
+    .node { fill: #ffffff; stroke: #2f6fec; stroke-width: 1.5; }
+    .edge { stroke: #9fb0cc; stroke-width: 1.4; fill: none; }
+    .hot { stroke: #f0b429; stroke-width: 2.6; fill: none; }
+    .ok { fill: #2f9e5b; font: 700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .v { fill: #2f6fec; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0b1220; }
+      .panel { fill: #111b2e; stroke: #2a3a57; }
+      .h { fill: #eef3ff; }
+      .s { fill: #9fb0cc; }
+      .m { fill: #a9c4ff; }
+      .track { fill: #22304a; }
+      .fill, .v { fill: #7aa7ff; }
+      .node { fill: #111b2e; stroke: #7aa7ff; }
+      .edge { stroke: #3c5076; }
+      .ok { fill: #5ccf8a; }
+    }
+  </style>
+
+  <rect class="bg" width="1000" height="300" rx="16"/>
+
+  <!-- 1. Quorum -->
+  <rect class="panel" x="24" y="24" width="300" height="252" rx="12"/>
+  <text class="h" x="44" y="54">1. Quorum on the anchor</text>
+  <text class="s" x="44" y="76">signed validations, checked against</text>
+  <text class="s" x="44" y="94">the UNL that was in force</text>
+  <g>
+    <circle class="v" cx="60"  cy="130" r="6"><animate attributeName="opacity" values=".2;1;1" keyTimes="0;.1;1" dur="6s" begin="0s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="90"  cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.1;.2;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="120" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.2;.3;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="150" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.3;.4;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="180" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.4;.5;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="210" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.5;.55;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="240" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.55;.6;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="270" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.6;.65;1" dur="6s" repeatCount="indefinite"/></circle>
+    <circle class="v" cx="300" cy="130" r="6" opacity=".2"/>
+  </g>
+  <rect class="track" x="44" y="170" width="260" height="14" rx="7"/>
+  <rect class="fill" x="44" y="170" height="14" rx="7" width="0">
+    <animate attributeName="width" values="0;0;231;231" keyTimes="0;.05;.65;1" dur="6s" repeatCount="indefinite"/>
+  </rect>
+  <line class="mark" x1="252" y1="162" x2="252" y2="192"/>
+  <text class="s" x="232" y="210">80%</text>
+  <text class="ok" x="44" y="250" opacity="0">confirmed<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.62;.66;1" dur="6s" repeatCount="indefinite"/></text>
+
+  <!-- 2. Hash chain -->
+  <rect class="panel" x="350" y="24" width="300" height="252" rx="12"/>
+  <text class="h" x="370" y="54">2. Hash chain down to target</text>
+  <text class="s" x="370" y="76">each header names its parent,</text>
+  <text class="s" x="370" y="94">so the anchor vouches for them</text>
+  <g>
+    <rect class="node" x="370" y="124" width="76" height="34" rx="6"/><text class="m" x="380" y="145">target</text>
+    <rect class="node" x="462" y="124" width="76" height="34" rx="6"/><text class="m" x="476" y="145">N + 1</text>
+    <rect class="node" x="554" y="124" width="76" height="34" rx="6"/><text class="m" x="564" y="145">anchor</text>
+    <path class="edge" d="M462 141 L446 141 M554 141 L538 141"/>
+    <path class="hot" d="M592 158 C592 200 500 200 500 158" stroke-dasharray="200" stroke-dashoffset="200">
+      <animate attributeName="stroke-dashoffset" values="200;200;0;0" keyTimes="0;.3;.5;1" dur="6s" repeatCount="indefinite"/>
+    </path>
+    <path class="hot" d="M500 158 C500 220 408 220 408 158" stroke-dasharray="220" stroke-dashoffset="220">
+      <animate attributeName="stroke-dashoffset" values="220;220;0;0" keyTimes="0;.5;.7;1" dur="6s" repeatCount="indefinite"/>
+    </path>
+  </g>
+  <text class="s" x="370" y="250">parent_hash, header by header</text>
+
+  <!-- 3. Inclusion -->
+  <rect class="panel" x="676" y="24" width="300" height="252" rx="12"/>
+  <text class="h" x="696" y="54">3. Transaction in the tree</text>
+  <text class="s" x="696" y="76">a path of sibling hashes up to the</text>
+  <text class="s" x="696" y="94">tx root in the target header</text>
+  <g>
+    <circle class="node" cx="826" cy="126" r="11"/>
+    <circle class="node" cx="776" cy="172" r="9"/><circle class="node" cx="876" cy="172" r="9"/>
+    <circle class="node" cx="751" cy="214" r="7"/><circle class="node" cx="801" cy="214" r="7"/>
+    <circle class="node" cx="851" cy="214" r="7"/><circle class="node" cx="901" cy="214" r="7"/>
+    <path class="edge" d="M826 137 L776 163 M826 137 L876 163 M776 181 L751 207 M776 181 L801 207 M876 181 L851 207 M876 181 L901 207"/>
+    <path class="hot" d="M801 207 L776 181 L826 137" stroke-dasharray="90" stroke-dashoffset="90">
+      <animate attributeName="stroke-dashoffset" values="90;90;0;0" keyTimes="0;.7;.85;1" dur="6s" repeatCount="indefinite"/>
+    </path>
+  </g>
+  <text class="m" x="788" y="240">your tx</text>
+  <text class="ok" x="696" y="262" opacity="0">proven without trusting the server<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.86;.9;1" dur="6s" repeatCount="indefinite"/></text>
+</svg>

@@ -1,0 +1,12 @@
+/target
+/dist
+**/*.rs.bk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.env
+.env.*
+# Local data from running the tools
+*.xwcp
+/data/

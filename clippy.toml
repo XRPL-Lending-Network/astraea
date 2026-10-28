@@ -1,0 +1,3 @@
+# In tests, unwrap and expect are the normal way to say "this must be Ok".
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

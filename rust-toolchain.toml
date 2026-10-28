@@ -1,0 +1,7 @@
+# The compiler version is pinned: developers and CI use the same one, and a
+# build today gives the same result as a build six months from now. Bump it
+# in a commit.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

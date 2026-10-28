@@ -1,0 +1,91 @@
+# API
+
+Astraea serves JSON-RPC over HTTP `POST /` and WebSocket on the same address, like Clio and rippled. Requests and responses follow Clio 2.x, including error tokens and codes, so existing client libraries work unchanged. Both API versions 1 and 2 are accepted (`api_version`), and version 2 is the default.
+
+Every response carries a warning that Astraea serves validated data only:
+
+```json
+{"id": 2001, "message": "This is an Astraea server. It serves only validated data."}
+```
+
+## Ledger range
+
+`server_info` reports `complete_ledgers` as one range. It goes down as far as there is cold history with indexes that joins up with the hot store without a gap, and up to the last ledger the Proof Engine has confirmed by quorum. A ledger that was loaded but isn't confirmed yet is not served.
+
+Ledgers outside the range get `lgrNotFound`, as on any server that doesn't have them. For `account_tx` with explicit bounds outside the range, version 2 returns `lgrIdxMalformed` like Clio.
+
+## Methods
+
+### History
+
+| Method | Notes |
+|---|---|
+| `ledger` | by `ledger_index` or `ledger_hash`, with `transactions`, `expand` and `binary` |
+| `tx` | by hash or by `ctid`; `binary` supported |
+| `account_tx` | full range, both directions, markers; `limit` defaults to 200, at most 1000 |
+
+These work over the whole range, hot and cold. Paging with markers is continuous across the hot/cold boundary and between cold partitions.
+
+### State
+
+| Method | Notes |
+|---|---|
+| `account_info` | `signer_lists` supported |
+| `account_lines`, `account_objects`, `account_offers` | `limit` 10 to 400, default 200 |
+| `ledger_entry` | by `index`, or `account_root`, `check`, `deposit_preauth`, `directory`, `escrow`, `nft_page`, `offer`, `payment_channel`, `ripple_state`, `ticket` |
+| `ledger_data` | up to 256 objects per page in JSON, 2048 in binary |
+| `mpt_holders` | as in Clio |
+
+State exists from the hot store's snapshot onward. A state query for an older ledger returns `lgrNotFound`.
+
+### Server
+
+`server_info` and `ping` are answered locally. `server_info` includes Clio's fields plus a few of Astraea's own:
+
+| Field | Meaning |
+|---|---|
+| `astraea`, `astraea_version` | server identification |
+| `confirmed_ledger` | newest ledger confirmed by validator quorum |
+| `loaded_ledger` | newest ledger loaded and checked, possibly not confirmed yet |
+| `confirmation_rule` | the quorum rule in force |
+| `state_root_checked` | whether the state root is checked on every ledger |
+
+`load_factor` and `rippled_version` are taken from a node when forwarding is configured.
+
+### Forwarded to a node
+
+When the server is started with `--forward-rpc`, these go to the node the way Clio sends them:
+
+- `fee`, `server_state`, `ledger_current`, `server_definitions`;
+- public read methods asked about the open ledger (`ledger_index` of `"current"` or `"closed"`): `account_info`, `account_lines`, `account_objects`, `account_offers`, `account_channels`, `account_currencies`, `account_nfts`, `amm_info`, `book_offers`, `book_changes`, `deposit_authorized`, `gateway_balances`, `ledger`, `ledger_data`, `ledger_entry`, `nft_buy_offers`, `nft_sell_offers`, `noripple_check`, `ripple_path_find`, `vault_info`;
+- `account_info` and `ledger` with `"queue": true`.
+
+Nothing else is forwarded, whatever its parameters say. Transaction submission and admin methods return `unknownCmd`. Forwarded answers carry `"forwarded": true`. If all nodes fail, the server answers `failedToForward` at once for the next 5 seconds instead of waiting on a dead node.
+
+### Subscriptions (WebSocket)
+
+`subscribe` and `unsubscribe` support the `ledger` and `transactions` streams and `accounts`. The streams Clio offers that Astraea doesn't (`validations`, `manifests`, `book_changes`, `transactions_proposed`, `accounts_proposed`, `books`) return `notSupported` instead of a silent subscription.
+
+- Each confirmed ledger is published once, in order: `ledgerClosed` first, then its transactions by `TransactionIndex`.
+- After subscribing to `ledger`, the first `ledgerClosed` is for the ledger right after the one in the subscribe response.
+- An account receives a transaction if the account is affected by it, the same set that `account_tx` uses.
+- One subscribe can name at most 10,000 accounts.
+- A session that falls 1500 messages behind is disconnected, like Clio's `ws_max_sending_queue_size`.
+
+## Proofs
+
+| Method | Parameters | Proves |
+|---|---|---|
+| `proof_ledger` | `ledger_index` or `ledger_hash` | the header and its hash were validated by quorum |
+| `proof_tx` | `transaction` (hash) | the transaction with this metadata is in a validated ledger |
+| `proof_entry` | the same selectors as `ledger_entry` | the object exists with this content, or does not exist, in the latest state |
+
+The response holds the package under `proof`, the anchor ledger, and two plain lists: what the package proves and what it does not (for example, a transaction proof says nothing about server-derived fields like `delivered_amount`).
+
+Limits in 0.1: the target has to be within 512 ledgers of an anchor with archived validations; `proof_tx` covers transactions in the hot store; `proof_entry` works on the latest state only and answers `notImpl` for other ledgers.
+
+Check a package offline. By default the verifier trusts the same two UNL publishers as xrpld's default configuration; `--publisher <hex key>` replaces them, `--threshold` sets how many lists must include a validator, and `--trust <n9… key>` adds a directly trusted validator.
+
+```bash
+witness-verify evidence package.json
+```

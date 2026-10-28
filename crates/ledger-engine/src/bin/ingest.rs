@@ -1,0 +1,548 @@
+//! astraea-ingest: loads validated ledgers into the Ledger Engine.
+//!
+//! Follows the network tip: once a second it asks xrpld for the latest
+//! validated ledger and loads everything up to it in order. After a
+//! restart it continues from the ledger after the last applied one.
+//!
+//! Every ledger is checked before it is written:
+//! - the transaction tree matches the root in the header;
+//! - the sequence is the next one in order, and the parent hash in the header is
+//!   the hash of the previously applied ledger. The chain cannot break and a gap
+//!   cannot slip through silently.
+//!
+//! Data goes to two places (in the `--data-dir` directory):
+//! - `state`: state over time (fjall). Object changes, header, indexes, the
+//!   state tree and the ledger itself in the block's pending set, all in one
+//!   atomic batch, synced to disk immediately. The tree root after the changes
+//!   must match the header's `AccountHash`, otherwise the ledger is rejected;
+//! - `history`: history (the `history` module). Transactions as one frame per
+//!   ledger with a dictionary, state changes in blocks; a group is written with
+//!   fsync, after which its ledgers are removed from pending.
+//!
+//! A Clio-compatible API is served on `--api-addr` (modules `api`, `server`),
+//! in the same process, because only one process can open the store.
+//!
+//! Metrics are on `--metrics-addr` (the `metrics` module): node tip and
+//! last applied ledger, its network close time, sizes on disk.
+//!
+//! Loaded does not mean confirmed. A ledger is confirmed by a quorum of UNL
+//! validators, using the nodes' validation stream (`--validations-ws`) and the
+//! publisher lists from the `witness-unl` archive (`--unl-dir`), checked against
+//! pinned keys (the `confirm` module). Once a ledger is confirmed, all ledgers
+//! before it are too, since the parent hash chain is already verified. The API
+//! serves only confirmed data.
+//!
+//! Loading can only start from a state snapshot (`astraea-state load`): without
+//! one there is nothing to build the state from. A ledger cannot be skipped: if the
+//! node no longer has it, the loader waits and retries, and the lag shows in the tip.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use ledger_engine::api::Engine;
+use ledger_engine::confirm::{self, Confirmer};
+use ledger_engine::forward::Forwarder;
+use ledger_engine::history::{Dict, HistoryReader, HistoryWriter};
+use ledger_engine::ledger::Ledger;
+use ledger_engine::log::{parse_records, read_journal};
+use ledger_engine::metrics::{self, Metrics, Shared, dir_bytes, lock};
+use ledger_engine::server;
+use ledger_engine::source::Source;
+use ledger_engine::state::StateStore;
+use tracing::{error, info, warn};
+use witness_core::evidence::ValidationEvidence;
+use witness_core::ledger::LedgerHeader;
+
+/// zstd level for state change blocks: they are rarely read, space matters more.
+const CHANGES_LEVEL: i32 = 19;
+
+#[derive(Debug, Parser)]
+#[command(version, about = "Astraea: loads validated ledgers from xrpld")]
+struct Args {
+    /// xrpld gRPC, e.g. http://<node-host>:50051.
+    #[arg(long, env = "ASTRAEA_GRPC")]
+    grpc: String,
+    /// Data directory: holds `state` and `history`.
+    #[arg(long, env = "ASTRAEA_DATA_DIR")]
+    data_dir: PathBuf,
+    /// Client name for xrpld (secure_gateway, no rate limit).
+    #[arg(long, default_value = "astraea")]
+    user: String,
+    /// First load ledgers from the journal of the previous loader version.
+    #[arg(long)]
+    import_log: Option<PathBuf>,
+    /// Ledgers per state change block (these are read only during
+    /// rebuilds); transactions are one frame per ledger.
+    #[arg(long, default_value_t = 128)]
+    changes_group: u32,
+    /// Ledgers per history segment.
+    #[arg(long, default_value_t = 32_768)]
+    segment_ledgers: u32,
+    /// zstd level for transaction frames; changes use level 19.
+    #[arg(long, default_value_t = 9)]
+    zstd_level: i32,
+    /// Prometheus metrics address, e.g. <metrics-host>:9104. No metrics without it.
+    #[arg(long, env = "ASTRAEA_METRICS_ADDR")]
+    metrics_addr: Option<SocketAddr>,
+    /// Address of the Clio-compatible API (JSON-RPC and WebSocket), e.g.
+    /// 127.0.0.1:51300. No API without it.
+    #[arg(long, env = "ASTRAEA_API_ADDR")]
+    api_addr: Option<SocketAddr>,
+    /// Node JSON-RPC endpoints for methods Clio forwards to a node (fee,
+    /// server_state, ledger_current, server_definitions), comma-separated,
+    /// e.g. http://<node-host>:51234. Without them these methods return unknownCmd.
+    #[arg(long, value_delimiter = ',')]
+    forward_rpc: Vec<String>,
+    /// Per-node timeout when forwarding, in seconds.
+    #[arg(long, default_value_t = 5)]
+    forward_timeout: u64,
+    /// Network NetworkID for ctid: 0 is mainnet.
+    #[arg(long, default_value_t = 0)]
+    network_id: u32,
+    /// Node WebSocket endpoints for the validation stream, comma-separated: ledgers
+    /// are confirmed by a UNL quorum from them, independent of the ledger source.
+    #[arg(long, value_delimiter = ',', required = true)]
+    validations_ws: Vec<String>,
+    /// UNL list archive of the witness-unl collector.
+    #[arg(long)]
+    unl_dir: PathBuf,
+    /// Trusted UNL list publisher keys (hex). Defaults to
+    /// vl.ripple.com and unl.xrplf.org, as in [validator_list_keys] on our nodes.
+    #[arg(long, value_delimiter = ',', default_values_t = [
+        "ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C64D11AD1B28FF73F4734".to_string(),
+        "ED42AEC58B701EEBB77356FFFEC26F83C1F0407263530F068C7C73D392C7E06FD1".to_string(),
+    ])]
+    publishers: Vec<String>,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Writes a ledger and records it in the metrics.
+fn commit(sink: &mut Sink, ledger: &Ledger, metrics: &Shared) -> Result<(), String> {
+    let t = Instant::now();
+    sink.commit(ledger)?;
+    let close_time = ledger.header()?.close_time;
+    let mut m = lock(metrics);
+    m.commit_seconds += t.elapsed().as_secs_f64();
+    m.ledgers += 1;
+    m.transactions += ledger.transactions.len() as u64;
+    m.changes += ledger.changes.len() as u64;
+    m.last_ledger = sink.last;
+    m.last_close_time = close_time;
+    m.last_commit_ms = now_ms();
+    m.pending_ledgers = sink.writer.buffered() as u64;
+    Ok(())
+}
+
+/// Previous object versions for format 3 changes, from the state
+/// store: the version as of ledger `at`.
+fn prev_of(
+    state: &Arc<StateStore>,
+) -> impl Fn(&[u8; 32], u32) -> Result<Option<Vec<u8>>, String> + Send + Sync + use<> {
+    let state = state.clone();
+    move |k, at| state.get(k, at)
+}
+
+/// Confirms the newest loaded ledger that reached a quorum: all ledgers before
+/// it are confirmed by the parent hash chain.
+fn try_confirm(sink: &Sink, confirmer: &Confirmer, metrics: &Shared) -> Result<(), String> {
+    let confirmed = sink.state.confirmed()?.unwrap_or(0);
+    let lowest = confirmed.max(sink.state.base()?.unwrap_or(0)) + 1;
+    let mut seq = sink.last;
+    // Look no deeper than 256 ledgers: older validations are not always still
+    // in the buffer, and confirming a newer ledger confirms those too.
+    while seq >= lowest && sink.last - seq < 256 {
+        let header = sink
+            .state
+            .header(seq)?
+            .ok_or(format!("no header for {seq}"))?;
+        let hash = LedgerHeader::parse(&header)
+            .map_err(|e| e.to_string())?
+            .hash();
+        if confirmer.check(seq, &hash).confirmed {
+            sink.state.set_confirmed(seq)?;
+            // Anchor evidence once every 256 ledgers: with it and the header chain
+            // we can prove ledgers whose validations are no longer in memory.
+            if sink
+                .state
+                .last_evidence()?
+                .is_none_or(|e| seq / 256 > e / 256)
+            {
+                let vals: Vec<ValidationEvidence> = confirmer
+                    .validations_for(seq, &hash)
+                    .into_iter()
+                    .map(|(raw, at)| ValidationEvidence {
+                        data: hex::encode_upper(raw),
+                        received_ms: at,
+                    })
+                    .collect();
+                sink.state.put_evidence(seq, &vals)?;
+                lock(metrics).evidence_ledger = seq;
+            }
+            lock(metrics).confirmed_ledger = seq;
+            return Ok(());
+        }
+        seq -= 1;
+    }
+    Ok(())
+}
+
+fn update_validation_stats(confirmer: &Confirmer, metrics: &Shared) {
+    let (connected, validations, rejected, manifests) = confirmer.stats();
+    let mut m = lock(metrics);
+    m.validations_connected = connected;
+    m.validations = validations;
+    m.validations_rejected = rejected;
+    m.manifests = manifests;
+}
+
+fn update_sizes(dir: &Path, metrics: &Shared) {
+    let (blocks, state) = (
+        dir_bytes(&dir.join("history")),
+        dir_bytes(&dir.join("state")),
+    );
+    let mut m = lock(metrics);
+    m.blocks_bytes = blocks;
+    m.state_bytes = state;
+}
+
+/// Where a verified ledger is written: state and blocks.
+#[derive(Debug)]
+struct Sink {
+    state: Arc<StateStore>,
+    history: PathBuf,
+    writer: HistoryWriter,
+    args: (u32, u32, i32),
+    in_segment: u32,
+    last: u32,
+    prev_hash: [u8; 32],
+}
+
+impl Sink {
+    fn open(
+        dir: &Path,
+        block_ledgers: u32,
+        segment_ledgers: u32,
+        level: i32,
+    ) -> Result<Sink, String> {
+        let state = Arc::new(StateStore::open(&dir.join("state"))?);
+        let last = state.last()?.ok_or(
+            "state is empty: load a snapshot first with astraea-state --db <data-dir>/state load",
+        )?;
+        let header = state
+            .header(last)?
+            .ok_or(format!("no header for ledger {last}"))?;
+        let prev_hash = LedgerHeader::parse(&header)
+            .map_err(|e| e.to_string())?
+            .hash();
+        if let Some(n) = state.ensure_mpt_index()? {
+            info!("MPT holder index built: {n} versions");
+        }
+        // The state root is checked on every ledger, so the tree is required.
+        if state.tree_ledger()? != Some(last) {
+            return Err(format!(
+                "state tree is not at ledger {last}: run astraea-state --db <data-dir>/state tree-build first"
+            ));
+        }
+
+        // Pending ledgers whose block was written before a crash are no longer needed;
+        // the rest must be contiguous from the end of blocks to the end of state.
+        let history = dir.join("history");
+        if !history.exists() && dir.join("blocks").exists() {
+            return Err(
+                "history is in the old format (blocks): run astraea-state history-migrate first"
+                    .into(),
+            );
+        }
+        std::fs::create_dir_all(&history).map_err(|e| e.to_string())?;
+        let mut pending = state.pending()?;
+        let reader = HistoryReader::open(&history)?;
+        let blocks_last = reader.last();
+        if let Some(b) = blocks_last {
+            state.drop_pending(b)?;
+            pending.retain(|(seq, _)| *seq > b);
+        }
+        let first = match (blocks_last, pending.first()) {
+            (Some(b), _) => b + 1,
+            (None, Some((p, _))) => *p,
+            (None, None) => last + 1,
+        };
+        let contiguous = pending
+            .iter()
+            .enumerate()
+            .all(|(i, (seq, _))| *seq == first + i as u32);
+        if !contiguous || first + pending.len() as u32 != last + 1 {
+            return Err(format!(
+                "blocks and state diverged: blocks up to {blocks_last:?}, {} pending, state up to {last}",
+                pending.len()
+            ));
+        }
+
+        // Indexes were added after the state: build them from the ledgers already
+        // written, from blocks and from pending.
+        let from = state.indexed()?.map_or(first, |i| i + 1);
+        if from <= last {
+            let t = Instant::now();
+            for seq in from..=last {
+                let body = match reader.get(seq)? {
+                    Some(b) => b,
+                    None => pending
+                        .iter()
+                        .find(|(p, _)| *p == seq)
+                        .map(|(_, b)| b.clone())
+                        .ok_or(format!("ledger {seq} is neither in blocks nor in pending"))?,
+                };
+                state.index_ledger(seq, &Ledger::decode(&body)?)?;
+            }
+            state.persist()?;
+            info!(
+                "indexes built: ledgers {from}..{last} in {:.0} s",
+                t.elapsed().as_secs_f64()
+            );
+        }
+        drop(reader);
+
+        let dict = Dict::current(&history)?;
+        let mut writer = HistoryWriter::create(
+            &history,
+            first,
+            block_ledgers,
+            level,
+            CHANGES_LEVEL,
+            dict.as_ref(),
+            true,
+        )?;
+        let in_segment = pending.len() as u32;
+        for (seq, body) in pending {
+            writer.append(seq, body, Some(&prev_of(&state)))?;
+            if writer.buffered() == 0 {
+                state.drop_pending(seq)?;
+            }
+        }
+        Ok(Sink {
+            state,
+            history,
+            writer,
+            args: (block_ledgers, segment_ledgers, level),
+            in_segment,
+            last,
+            prev_hash,
+        })
+    }
+
+    fn next(&self) -> u32 {
+        self.last + 1
+    }
+
+    /// Checks a ledger and writes it. Accepts only the next one in
+    /// order that continues the hash chain.
+    fn commit(&mut self, ledger: &Ledger) -> Result<(), String> {
+        let header = ledger.verify()?;
+        let seq = header.sequence;
+        if seq != self.next() {
+            return Err(format!("expected {}, got {seq}", self.next()));
+        }
+        if header.parent_hash != self.prev_hash {
+            return Err(format!(
+                "chain broken at {seq}: parent hash does not match the previous ledger"
+            ));
+        }
+        let body = ledger.encode();
+        self.state.apply_ledger(seq, ledger, &body)?;
+        self.state.persist()?;
+        self.writer.append(seq, body, Some(&prev_of(&self.state)))?;
+        if self.writer.buffered() == 0 {
+            self.state.drop_pending(seq)?;
+        }
+        self.in_segment += 1;
+        let (block_ledgers, segment_ledgers, level) = self.args;
+        if self.in_segment >= segment_ledgers && self.writer.buffered() == 0 {
+            let dict = Dict::current(&self.history)?;
+            let fresh = HistoryWriter::create(
+                &self.history,
+                seq + 1,
+                block_ledgers,
+                level,
+                CHANGES_LEVEL,
+                dict.as_ref(),
+                true,
+            )?;
+            std::mem::replace(&mut self.writer, fresh).finish()?;
+            self.in_segment = 0;
+            info!("block segment closed at {seq}");
+        }
+        self.last = seq;
+        self.prev_hash = header.hash();
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,fjall=warn,lsm_tree=warn".into()),
+        )
+        .without_time()
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .init();
+    let args = Args::parse();
+    if let Err(e) = run(args).await {
+        error!("stopped with error: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(args: Args) -> Result<(), String> {
+    let mut sink = Sink::open(
+        &args.data_dir,
+        args.changes_group,
+        args.segment_ledgers,
+        args.zstd_level,
+    )?;
+    let metrics: Shared = Arc::new(Mutex::new(Metrics {
+        last_ledger: sink.last,
+        pending_ledgers: sink.writer.buffered() as u64,
+        ..Metrics::default()
+    }));
+    update_sizes(&args.data_dir, &metrics);
+    if let Some(addr) = args.metrics_addr {
+        tokio::spawn(metrics::serve(addr, metrics.clone()));
+    }
+    let publishers = args
+        .publishers
+        .iter()
+        .map(|h| hex::decode(h).map_err(|e| format!("publisher key {h}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let confirmer = Confirmer::new(publishers, args.unl_dir.clone());
+    for url in &args.validations_ws {
+        tokio::spawn(confirm::listen(url.clone(), confirmer.clone()));
+    }
+    lock(&metrics).confirmed_ledger = sink.state.confirmed()?.unwrap_or(0);
+    lock(&metrics).evidence_ledger = sink.state.last_evidence()?.unwrap_or(0);
+    if let Some(addr) = args.api_addr {
+        let engine = Engine {
+            state: sink.state.clone(),
+            blocks: HistoryReader::open(&args.data_dir.join("history"))?
+                .with_prev(Arc::new(prev_of(&sink.state))),
+            network_id: args.network_id,
+            started: Instant::now(),
+            confirmer: Some(confirmer.clone()),
+            quorum: Default::default(),
+        };
+        let forwarder = (!args.forward_rpc.is_empty()).then(|| {
+            Arc::new(Forwarder::new(
+                args.forward_rpc.clone(),
+                Duration::from_secs(args.forward_timeout),
+            ))
+        });
+        let engine = Arc::new(engine);
+        // New cold files are picked up in the background, more often than the
+        // check in `range()`, so requests do not wait for the directory re-read.
+        let bg = engine.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(15));
+                if let Err(e) = bg.blocks.refresh_cold_every(Duration::from_secs(15)) {
+                    warn!("cold history not re-read: {e}");
+                }
+            }
+        });
+        tokio::spawn(server::serve(addr, engine, forwarder));
+    }
+    if let Some(dir) = &args.import_log {
+        let from = sink.next();
+        for raw in read_journal(dir)? {
+            let (records, _) = parse_records(&raw)?;
+            for (seq, body) in records {
+                if seq >= sink.next() {
+                    commit(&mut sink, &Ledger::decode(body)?, &metrics)?;
+                }
+            }
+        }
+        info!(
+            "from journal {}: ledgers {from}..{}",
+            dir.display(),
+            sink.last
+        );
+    }
+    let mut source = Source::connect(&args.grpc, &args.user).await?;
+    source.require_unlimited().await?;
+    info!(
+        "tip {}, starting from {}",
+        source.validated().await?,
+        sink.next()
+    );
+
+    let mut shutdown = Box::pin(tokio::signal::ctrl_c());
+    let mut stats_at = Instant::now();
+    let mut written = 0u64;
+    loop {
+        let tip = tokio::select! {
+            r = source.validated() => r,
+            _ = &mut shutdown => break,
+        };
+        let tip = match tip {
+            Ok(t) => {
+                let mut m = lock(&metrics);
+                m.connected = true;
+                m.tip_ledger = t;
+                t
+            }
+            Err(e) => {
+                {
+                    let mut m = lock(&metrics);
+                    m.connected = false;
+                    m.source_errors += 1;
+                }
+                warn!("tip: {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        while sink.next() <= tip {
+            let next = sink.next();
+            let ledger = match source.ledger(next).await {
+                Ok(l) => l,
+                Err(e) => {
+                    let missing = e.contains("NotFound") || e.contains("not found");
+                    {
+                        let mut m = lock(&metrics);
+                        m.source_errors += 1;
+                        m.missing_retries += u64::from(missing);
+                    }
+                    warn!("ledger {next}: {e}; retrying");
+                    tokio::time::sleep(Duration::from_secs(if missing { 30 } else { 2 })).await;
+                    continue;
+                }
+            };
+            commit(&mut sink, &ledger, &metrics)?;
+            try_confirm(&sink, &confirmer, &metrics)?;
+            written += 1;
+        }
+        // Validations can arrive after the ledger, so try even without new writes.
+        try_confirm(&sink, &confirmer, &metrics)?;
+        update_validation_stats(&confirmer, &metrics);
+        if stats_at.elapsed() > Duration::from_secs(60) {
+            info!("written in the last minute: {written}, last {}", sink.last);
+            written = 0;
+            stats_at = Instant::now();
+            update_sizes(&args.data_dir, &metrics);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = &mut shutdown => break,
+        }
+    }
+    info!("stopped, last applied {}", sink.last);
+    Ok(())
+}

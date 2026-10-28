@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-labelledby="t d">
+  <title id="t">Astraea</title>
+  <desc id="d">Validator signatures converge into a chain of ledgers that keeps moving forward.</desc>
+  <style>
+    .bg { fill: #f6f8fb; }
+    .ink { fill: #0f1b2d; }
+    .muted { fill: #51607a; }
+    .star { fill: #2f6fec; }
+    .line { stroke: #2f6fec; stroke-opacity: .28; stroke-width: 1.2; fill: none; }
+    .block { fill: #ffffff; stroke: #2f6fec; stroke-width: 1.5; }
+    .block-text { fill: #2f6fec; font: 600 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .link { stroke: #2f6fec; stroke-width: 1.5; stroke-dasharray: 4 4; }
+    .pulse { fill: #f0b429; }
+    .title { font: 700 64px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: -1px; }
+    .tag { font: 400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0b1220; }
+      .ink { fill: #eef3ff; }
+      .muted { fill: #9fb0cc; }
+      .star { fill: #7aa7ff; }
+      .line { stroke: #7aa7ff; }
+      .block { fill: #111b2e; stroke: #7aa7ff; }
+      .block-text { fill: #a9c4ff; }
+      .link { stroke: #7aa7ff; }
+    }
+    .tw { animation: tw 3.2s ease-in-out infinite; }
+    .tw2 { animation: tw 4.1s ease-in-out infinite .8s; }
+    .tw3 { animation: tw 2.7s ease-in-out infinite 1.6s; }
+    @keyframes tw { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    .chain { animation: slide 12s linear infinite; }
+    @keyframes slide { from { transform: translateX(0); } to { transform: translateX(-300px); } }
+    @media (prefers-reduced-motion: reduce) {
+      .tw, .tw2, .tw3, .chain { animation: none; }
+    }
+  </style>
+
+  <rect class="bg" width="1200" height="340" rx="16"/>
+
+  <!-- Wordmark -->
+  <text class="title ink" x="64" y="150">Astraea</text>
+  <text class="tag muted" x="66" y="190">XRPL history you can check yourself.</text>
+  <text class="tag muted" x="66" y="218" style="font-size:16px">Clio-compatible API · full ledger history · proofs backed by validator signatures</text>
+
+  <!-- Constellation: validators on the right -->
+  <g>
+    <path class="line" d="M700 60 L790 40 L880 74 L960 48 L1050 88 L1120 56"/>
+    <path class="line" d="M790 40 L840 120 L880 74 M960 48 L1000 130 L1050 88 M840 120 L1000 130"/>
+    <circle class="star tw"  cx="700"  cy="60"  r="4"/>
+    <circle class="star tw2" cx="790"  cy="40"  r="5"/>
+    <circle class="star tw3" cx="880"  cy="74"  r="4"/>
+    <circle class="star tw"  cx="960"  cy="48"  r="5"/>
+    <circle class="star tw2" cx="1050" cy="88"  r="4"/>
+    <circle class="star tw3" cx="1120" cy="56"  r="4"/>
+    <circle class="star tw2" cx="840"  cy="120" r="3.5"/>
+    <circle class="star tw"  cx="1000" cy="130" r="3.5"/>
+  </g>
+
+  <!-- Signatures falling from validators to the newest ledger -->
+  <g>
+    <circle class="pulse" r="3.5">
+      <animateMotion dur="2.4s" repeatCount="indefinite" path="M790 40 C800 140 900 200 1010 250"/>
+      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" repeatCount="indefinite"/>
+    </circle>
+    <circle class="pulse" r="3.5">
+      <animateMotion dur="2.4s" begin=".6s" repeatCount="indefinite" path="M960 48 C980 140 1000 200 1010 250"/>
+      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" begin=".6s" repeatCount="indefinite"/>
+    </circle>
+    <circle class="pulse" r="3.5">
+      <animateMotion dur="2.4s" begin="1.2s" repeatCount="indefinite" path="M1120 56 C1100 150 1050 210 1010 250"/>
+      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" begin="1.2s" repeatCount="indefinite"/>
+    </circle>
+    <circle class="pulse" r="3.5">
+      <animateMotion dur="2.4s" begin="1.8s" repeatCount="indefinite" path="M880 74 C900 160 960 220 1010 250"/>
+      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" begin="1.8s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+
+  <!-- Ledger chain scrolling left -->
+  <clipPath id="lane"><rect x="40" y="240" width="1120" height="70"/></clipPath>
+  <g clip-path="url(#lane)">
+    <g class="chain">
+      <g id="blk">
+        <rect class="block" x="0" y="250" width="110" height="44" rx="8"/>
+      </g>
+      <use href="#blk" x="64"/><use href="#blk" x="214"/><use href="#blk" x="364"/><use href="#blk" x="514"/><use href="#blk" x="664"/><use href="#blk" x="814"/><use href="#blk" x="964"/><use href="#blk" x="1114"/><use href="#blk" x="1264"/><use href="#blk" x="1414"/>
+      <line class="link" x1="174" y1="272" x2="214" y2="272"/><line class="link" x1="324" y1="272" x2="364" y2="272"/><line class="link" x1="474" y1="272" x2="514" y2="272"/><line class="link" x1="624" y1="272" x2="664" y2="272"/><line class="link" x1="774" y1="272" x2="814" y2="272"/><line class="link" x1="924" y1="272" x2="964" y2="272"/><line class="link" x1="1074" y1="272" x2="1114" y2="272"/><line class="link" x1="1224" y1="272" x2="1264" y2="272"/><line class="link" x1="1374" y1="272" x2="1414" y2="272"/>
+      <text class="block-text" x="80" y="277">parent ✓</text>
+      <text class="block-text" x="230" y="277">tx root ✓</text>
+      <text class="block-text" x="380" y="277">parent ✓</text>
+      <text class="block-text" x="530" y="277">tx root ✓</text>
+      <text class="block-text" x="680" y="277">parent ✓</text>
+      <text class="block-text" x="830" y="277">tx root ✓</text>
+      <text class="block-text" x="980" y="277">parent ✓</text>
+      <text class="block-text" x="1130" y="277">tx root ✓</text>
+      <text class="block-text" x="1280" y="277">parent ✓</text>
+      <text class="block-text" x="1430" y="277">tx root ✓</text>
+    </g>
+  </g>
+</svg>

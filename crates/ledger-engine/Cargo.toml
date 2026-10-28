@@ -1,0 +1,79 @@
+[package]
+name = "ledger-engine"
+description = "Astraea Ledger Engine: loading, storing and serving validated XRPL ledgers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "astraea-ingest"
+path = "src/bin/ingest.rs"
+
+[[bin]]
+name = "astraea-snapshot"
+path = "src/bin/snapshot.rs"
+
+[[bin]]
+name = "astraea-state"
+path = "src/bin/state.rs"
+
+[[bin]]
+name = "astraea-layoutbench"
+path = "src/bin/layoutbench.rs"
+
+[[bin]]
+name = "astraea-deltabench"
+path = "src/bin/deltabench.rs"
+
+[[bin]]
+name = "astraea-xrpla"
+path = "src/bin/xrpla.rs"
+
+[[bin]]
+name = "astraea-indexbench"
+path = "src/bin/indexbench.rs"
+
+[[bin]]
+name = "astraea-coldbench"
+path = "src/bin/coldbench.rs"
+
+[[bin]]
+name = "astraea-codecbench"
+path = "src/bin/codecbench.rs"
+
+[[bin]]
+name = "astraea-blockbench"
+path = "src/bin/blockbench.rs"
+
+[dependencies]
+witness-core.workspace = true
+astraea-journal-codec = { path = "../astj5" }
+hex.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+zstd.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "net", "io-util", "sync"] }
+tonic = "0.12"
+prost = "0.13"
+fjall = "3.1.12"
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+sha2.workspace = true
+ureq.workspace = true
+ed25519-dalek.workspace = true
+
+[build-dependencies]
+tonic-build = { version = "0.12", default-features = false, features = ["prost", "transport"] }
+protox = "0.7"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

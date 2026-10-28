@@ -1,0 +1,23 @@
+# ASTJ5 / JC05, canonical profile: cold history storage for Astraea (design
+# brief of 2026-10-27). The src/ files are byte-for-byte copies from the
+# research package astraea-journal-sequential-2026-10-27/codec/src (package
+# SHA256SUMS 283862fa4538e758678fde514cb09d85c2c4a3dee520012fab1632cdc292cbf8);
+# only the path to witness-core was changed (it matches pinned snapshot
+# 7838927). Added during integration: src/pool.rs (a pool of prepared blocks
+# for serving) and the `pub mod pool;` line in lib.rs. The format and the
+# existing modules are unchanged.
+# This is a research format: the production version and its compatibility
+# rules will be fixed separately.
+[package]
+name = "astraea-journal-codec"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+[dependencies]
+witness-core = { path = "../witness-core" }
+hex = "0.4"
+serde_json = "1"
+zstd = "0.13"
+k256 = { version = "0.13", features = ["ecdsa"] }
+sha2 = "0.10"
