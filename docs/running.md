@@ -89,5 +89,6 @@ A chunk of recent mainnet history (2 to 4 million transactions) takes 15 to 30 m
 
 - `astraea-client-replay.py` replays recorded client requests against both servers and compares the answers;
 - `astraea-cold-compare.py` samples ledgers, transactions and account history across a range;
-- `astraea-beta-compare.py`, `astraea-subs-compare.py`, `astraea-ws-compare.py` cover forwarding, `server_info` and subscriptions.
-- `astraea-clio-bench.py` measures latency and throughput of both servers on the same requests.
+- `astraea-beta-compare.py`, `astraea-subs-compare.py`, `astraea-ws-compare.py` cover forwarding, `server_info` and subscriptions;
+- `astraea-clio-bench.py` measures latency and throughput of both servers on the same requests;
+- `astraea-client-latency.py` does the same on a client's real requests from the Clio log, in their real mix.
