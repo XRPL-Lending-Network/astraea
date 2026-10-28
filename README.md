@@ -62,7 +62,7 @@ A package for a transaction carries the validations that put an anchor ledger ov
 | `crates/witness-store` | Append-only segment store with a hash chain of seals |
 | `crates/witness-verify` | Independent checker for the archive and for evidence packages |
 
-`scripts/` has the tools used to load the full history and to compare Astraea with Clio request by request.
+`scripts/` has the tools used to load the full history and to compare Astraea with Clio request by request. `tools/readme-art.py` draws the animated graphics in `assets/`.
 
 ## Building
 
