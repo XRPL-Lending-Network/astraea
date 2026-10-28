@@ -6,8 +6,8 @@
 //! bursts of fee polling.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
@@ -102,6 +102,10 @@ const CACHE_MAX: usize = 64;
 /// a hung node must not hold request slots and slow down server_info.
 const DOWN_FOR: Duration = Duration::from_secs(5);
 
+/// How old the node's server_info may be and still be merged into ours while
+/// a refresh runs; older than this (the node stopped answering), it is dropped.
+const INFO_KEEP: Duration = Duration::from_secs(10);
+
 /// Method and params → when the node response was received, and the response.
 type Cache = HashMap<String, (Instant, Map<String, Value>)>;
 
@@ -114,6 +118,9 @@ pub struct Forwarder {
     cache: Mutex<Cache>,
     /// When all nodes last failed to respond.
     down: Mutex<Option<Instant>>,
+    /// The node's last server_info and when it came, for `node_server_info`.
+    info: Mutex<Option<(Instant, Map<String, Value>)>>,
+    info_refreshing: AtomicBool,
 }
 
 impl Forwarder {
@@ -128,7 +135,41 @@ impl Forwarder {
             next: AtomicUsize::new(0),
             cache: Mutex::new(HashMap::new()),
             down: Mutex::new(None),
+            info: Mutex::new(None),
+            info_refreshing: AtomicBool::new(false),
         }
+    }
+
+    /// The node's server_info, for the fields merged into ours. Returns the
+    /// last answer at once and, once it is older than `CACHE_FOR`, refreshes
+    /// it in the background, so a client's server_info doesn't wait for the
+    /// node. Only the first call, or one after the node has been silent for
+    /// `INFO_KEEP`, waits.
+    pub fn node_server_info(self: &Arc<Self>) -> Option<Map<String, Value>> {
+        let last = self
+            .info
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < INFO_KEEP)
+            .map(|(at, m)| (at.elapsed() >= CACHE_FOR, m.clone()));
+        let Some((stale, info)) = last else {
+            return self.refresh_info();
+        };
+        if stale && !self.info_refreshing.swap(true, Ordering::AcqRel) {
+            let f = self.clone();
+            std::thread::spawn(move || {
+                f.refresh_info();
+                f.info_refreshing.store(false, Ordering::Release);
+            });
+        }
+        Some(info)
+    }
+
+    fn refresh_info(&self) -> Option<Map<String, Value>> {
+        let r = self.forward("server_info", &Map::new()).ok()?;
+        *self.info.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), r.clone()));
+        Some(r)
     }
 
     /// `result` of the node's response. An error from the node itself (`status: error`)
@@ -247,6 +288,50 @@ mod tests {
         // Node response without info: our own fields are left alone.
         node_info(r, json!({"error": "x"}).as_object().unwrap());
         assert_eq!(r["info"]["complete_ledgers"], json!("1-2"));
+    }
+
+    /// A node that answers server_info after `delay`, with a load factor
+    /// counting its answers.
+    fn slow_node(delay: Duration) -> String {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for (n, s) in l.incoming().enumerate() {
+                let mut s = s.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                std::thread::sleep(delay);
+                let body = json!({"result": {"info": {"load_factor": n + 1}}}).to_string();
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn server_info_from_the_node_is_refreshed_in_the_background() {
+        let f = Arc::new(Forwarder::new(
+            vec![slow_node(Duration::from_millis(150))],
+            Duration::from_secs(5),
+        ));
+        let lf = |m: Map<String, Value>| m["info"]["load_factor"].as_u64().unwrap();
+        // The first call has nothing to give yet and waits for the node.
+        let t = Instant::now();
+        assert_eq!(lf(f.node_server_info().unwrap()), 1);
+        assert!(t.elapsed() >= Duration::from_millis(150));
+        std::thread::sleep(CACHE_FOR);
+        // Stale: the old answer comes at once, the new one arrives behind it.
+        let t = Instant::now();
+        assert_eq!(lf(f.node_server_info().unwrap()), 1);
+        assert_eq!(lf(f.node_server_info().unwrap()), 1);
+        assert!(t.elapsed() < Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(lf(f.node_server_info().unwrap()), 2);
     }
 
     #[test]

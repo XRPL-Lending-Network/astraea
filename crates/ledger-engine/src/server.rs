@@ -129,10 +129,11 @@ async fn call(s: &Shared, method: String, params: Map<String, Value>) -> Result<
     let info = method == "server_info";
     let mut r = call_own(s, method, params).await?;
     // Fee multiplier and version come from the node, as in Clio; if the node is
-    // unavailable, our own response stays.
+    // unavailable, our own response stays. The node's answer is refreshed in the
+    // background, so this doesn't wait for the node.
     if let (true, Some(f)) = (info, s.forwarder.clone()) {
-        let node = tokio::task::spawn_blocking(move || f.forward("server_info", &Map::new())).await;
-        if let Ok(Ok(node)) = node {
+        let node = tokio::task::spawn_blocking(move || f.node_server_info()).await;
+        if let Ok(Some(node)) = node {
             node_info(&mut r, &node);
         }
     }
