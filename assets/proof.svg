@@ -1,94 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 300" width="1000" height="300" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 330" width="1000" height="330" role="img" aria-labelledby="t d">
   <title id="t">What an evidence package proves</title>
-  <desc id="d">Validator signatures fill a quorum meter past 80 percent for an anchor ledger. A chain of parent hashes links the target ledger to the anchor, and a path in the transaction tree links the transaction to the target ledger header.</desc>
+  <desc id="d">Eight of ten validators sign the anchor ledger and the quorum bar crosses 80 percent. Parent hashes link the anchor back to the target ledger. A path of sibling hashes links the transaction to the transaction root in the target header.</desc>
   <style>
-    .bg { fill: #f6f8fb; }
-    .panel { fill: #ffffff; stroke: #c9d3e3; stroke-width: 1.2; }
-    .h { fill: #0f1b2d; font: 600 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-    .s { fill: #51607a; font: 400 12.5px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-    .m { fill: #2f6fec; font: 600 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .track { fill: #e4e9f2; }
-    .fill { fill: #2f6fec; }
-    .mark { stroke: #d14343; stroke-width: 2; stroke-dasharray: 3 3; }
-    .node { fill: #ffffff; stroke: #2f6fec; stroke-width: 1.5; }
-    .edge { stroke: #9fb0cc; stroke-width: 1.4; fill: none; }
-    .hot { stroke: #f0b429; stroke-width: 2.6; fill: none; }
-    .ok { fill: #2f9e5b; font: 700 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-    .v { fill: #2f6fec; }
-    @media (prefers-color-scheme: dark) {
-      .bg { fill: #0b1220; }
-      .panel { fill: #111b2e; stroke: #2a3a57; }
-      .h { fill: #eef3ff; }
-      .s { fill: #9fb0cc; }
-      .m { fill: #a9c4ff; }
-      .track { fill: #22304a; }
-      .fill, .v { fill: #7aa7ff; }
-      .node { fill: #111b2e; stroke: #7aa7ff; }
-      .edge { stroke: #3c5076; }
-      .ok { fill: #5ccf8a; }
-    }
-  </style>
-
-  <rect class="bg" width="1000" height="300" rx="16"/>
-
-  <!-- 1. Quorum -->
-  <rect class="panel" x="24" y="24" width="300" height="252" rx="12"/>
-  <text class="h" x="44" y="54">1. Quorum on the anchor</text>
-  <text class="s" x="44" y="76">signed validations, checked against</text>
-  <text class="s" x="44" y="94">the UNL that was in force</text>
-  <g>
-    <circle class="v" cx="60"  cy="130" r="6"><animate attributeName="opacity" values=".2;1;1" keyTimes="0;.1;1" dur="6s" begin="0s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="90"  cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.1;.2;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="120" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.2;.3;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="150" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.3;.4;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="180" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.4;.5;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="210" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.5;.55;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="240" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.55;.6;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="270" cy="130" r="6"><animate attributeName="opacity" values=".2;.2;1;1" keyTimes="0;.6;.65;1" dur="6s" repeatCount="indefinite"/></circle>
-    <circle class="v" cx="300" cy="130" r="6" opacity=".2"/>
-  </g>
-  <rect class="track" x="44" y="170" width="260" height="14" rx="7"/>
-  <rect class="fill" x="44" y="170" height="14" rx="7" width="0">
-    <animate attributeName="width" values="0;0;231;231" keyTimes="0;.05;.65;1" dur="6s" repeatCount="indefinite"/>
-  </rect>
-  <line class="mark" x1="252" y1="162" x2="252" y2="192"/>
-  <text class="s" x="232" y="210">80%</text>
-  <text class="ok" x="44" y="250" opacity="0">confirmed<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.62;.66;1" dur="6s" repeatCount="indefinite"/></text>
-
-  <!-- 2. Hash chain -->
-  <rect class="panel" x="350" y="24" width="300" height="252" rx="12"/>
-  <text class="h" x="370" y="54">2. Hash chain down to target</text>
-  <text class="s" x="370" y="76">each header names its parent,</text>
-  <text class="s" x="370" y="94">so the anchor vouches for them</text>
-  <g>
-    <rect class="node" x="370" y="124" width="76" height="34" rx="6"/><text class="m" x="380" y="145">target</text>
-    <rect class="node" x="462" y="124" width="76" height="34" rx="6"/><text class="m" x="476" y="145">N + 1</text>
-    <rect class="node" x="554" y="124" width="76" height="34" rx="6"/><text class="m" x="564" y="145">anchor</text>
-    <path class="edge" d="M462 141 L446 141 M554 141 L538 141"/>
-    <path class="hot" d="M592 158 C592 200 500 200 500 158" stroke-dasharray="200" stroke-dashoffset="200">
-      <animate attributeName="stroke-dashoffset" values="200;200;0;0" keyTimes="0;.3;.5;1" dur="6s" repeatCount="indefinite"/>
-    </path>
-    <path class="hot" d="M500 158 C500 220 408 220 408 158" stroke-dasharray="220" stroke-dashoffset="220">
-      <animate attributeName="stroke-dashoffset" values="220;220;0;0" keyTimes="0;.5;.7;1" dur="6s" repeatCount="indefinite"/>
-    </path>
-  </g>
-  <text class="s" x="370" y="250">parent_hash, header by header</text>
-
-  <!-- 3. Inclusion -->
-  <rect class="panel" x="676" y="24" width="300" height="252" rx="12"/>
-  <text class="h" x="696" y="54">3. Transaction in the tree</text>
-  <text class="s" x="696" y="76">a path of sibling hashes up to the</text>
-  <text class="s" x="696" y="94">tx root in the target header</text>
-  <g>
-    <circle class="node" cx="826" cy="126" r="11"/>
-    <circle class="node" cx="776" cy="172" r="9"/><circle class="node" cx="876" cy="172" r="9"/>
-    <circle class="node" cx="751" cy="214" r="7"/><circle class="node" cx="801" cy="214" r="7"/>
-    <circle class="node" cx="851" cy="214" r="7"/><circle class="node" cx="901" cy="214" r="7"/>
-    <path class="edge" d="M826 137 L776 163 M826 137 L876 163 M776 181 L751 207 M776 181 L801 207 M876 181 L851 207 M876 181 L901 207"/>
-    <path class="hot" d="M801 207 L776 181 L826 137" stroke-dasharray="90" stroke-dashoffset="90">
-      <animate attributeName="stroke-dashoffset" values="90;90;0;0" keyTimes="0;.7;.85;1" dur="6s" repeatCount="indefinite"/>
-    </path>
-  </g>
-  <text class="m" x="788" y="240">your tx</text>
-  <text class="ok" x="696" y="262" opacity="0">proven without trusting the server<animate attributeName="opacity" values="0;0;1;1" keyTimes="0;.86;.9;1" dur="6s" repeatCount="indefinite"/></text>
+    .serif { font-family: 'Tiempos Headline','Iowan Old Style','Palatino Linotype',Palatino,Georgia,'Times New Roman',serif; }
+    .sans { font-family: Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; }
+    .mono { font-family: ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace; }
+    @media (prefers-reduced-motion: reduce) { .m { animation: none !important; } }
+</style>
+  <rect width="1000" height="330" rx="16" fill="#0a0a0a"/>
+  <rect x=".5" y=".5" width="999" height="329" rx="15.5" fill="none" stroke="#1d1d1d"/>
+  <rect x="24" y="24" width="300" height="282" rx="6" fill="#111111" stroke="#262626"/><text x="46" y="56" class="mono" font-size="11" fill="#8b8b8b" letter-spacing="1.5">01</text><text x="46" y="84" class="serif" font-size="21" fill="#f5f5f4">Quorum on the anchor</text><text x="46" y="106" class="sans" font-size="12.5" fill="#8b8b8b">signatures checked against the UNL in force</text><circle cx="58" cy="150" r="7" fill="#3b82f6" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0;0.1;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="84" cy="150" r="7" fill="#22c55e" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.1;0.1;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="110" cy="150" r="7" fill="#facc15" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.1;0.1;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="136" cy="150" r="7" fill="#d946ef" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.2;0.2;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="162" cy="150" r="7" fill="#fb7185" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.2;0.2;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="188" cy="150" r="7" fill="#8b5cf6" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.2;0.2;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="214" cy="150" r="7" fill="#3b82f6" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.3;0.3;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="240" cy="150" r="7" fill="#22c55e" opacity=".15"><animate attributeName="opacity" values="0.15;0.15;1;1;0.15" keyTimes="0;0.3;0.3;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="266" cy="150" r="7" fill="none" stroke="#3a3a3a" stroke-dasharray="2 3"/><circle cx="292" cy="150" r="7" fill="none" stroke="#3a3a3a" stroke-dasharray="2 3"/><text x="46" y="182" class="sans" font-size="12" fill="#8b8b8b">8 of 10 validators signed</text><rect x="46" y="204" width="256" height="6" rx="3" fill="#1f1f1f"/><rect x="46" y="204" height="6" rx="3" width="0" fill="#22c55e"><animate attributeName="width" values="0;0;25.6;51.2;76.8;102.4;128;153.6;179.2;204.8;204.8;0" keyTimes="0;0;0.1;0.1;0.1;0.2;0.2;0.2;0.3;0.3;1;1" dur="9.0s" repeatCount="indefinite" calcMode="linear"/></rect><line x1="250.8" y1="196" x2="250.8" y2="218" stroke="#f5f5f4" stroke-width="1.2"/><text x="250.8" y="236" text-anchor="middle" class="mono" font-size="11" fill="#8b8b8b">80%</text><g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.3;0.3;1;1" dur="9.0s" repeatCount="indefinite"/><circle cx="54" cy="274" r="8" fill="#22c55e"/><path d="M50 274 l3 3 l5 -6" stroke="#0a0a0a" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="70" y="279" class="sans" font-size="13" font-weight="600" fill="#f5f5f4">anchor ledger confirmed</text></g><rect x="350" y="24" width="300" height="282" rx="6" fill="#111111" stroke="#262626"/><text x="372" y="56" class="mono" font-size="11" fill="#8b8b8b" letter-spacing="1.5">02</text><text x="372" y="84" class="serif" font-size="21" fill="#f5f5f4">Hash chain to the target</text><text x="372" y="106" class="sans" font-size="12.5" fill="#8b8b8b">each header commits to its parent</text><rect x="372" y="150" width="56" height="40" rx="4" fill="#161616" stroke="#262626"/><text x="400" y="174" text-anchor="middle" class="mono" font-size="11" fill="#f5f5f4">target</text><rect x="440" y="150" width="56" height="40" rx="4" fill="#161616" stroke="#262626"/><text x="468" y="174" text-anchor="middle" class="mono" font-size="11" fill="#f5f5f4">N+1</text><rect x="508" y="150" width="56" height="40" rx="4" fill="#161616" stroke="#262626"/><text x="536" y="174" text-anchor="middle" class="mono" font-size="11" fill="#f5f5f4">N+2</text><rect x="576" y="150" width="56" height="40" rx="4" fill="#161616" stroke="#22c55e"/><text x="604" y="174" text-anchor="middle" class="mono" font-size="11" fill="#f5f5f4">anchor</text><path d="M440 170 L430 170 M435 166 L430 170 L435 174" stroke="#3a3a3a" stroke-width="1.2" fill="none"/><path d="M508 170 L498 170 M503 166 L498 170 L503 174" stroke="#3a3a3a" stroke-width="1.2" fill="none"/><path d="M576 170 L566 170 M571 166 L566 170 L571 174" stroke="#3a3a3a" stroke-width="1.2" fill="none"/><rect x="508" y="150" width="56" height="40" rx="4" fill="none" stroke="#22c55e" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.4;0.4;1;1" dur="9.0s" repeatCount="indefinite"/></rect><rect x="440" y="150" width="56" height="40" rx="4" fill="none" stroke="#22c55e" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.4;0.4;1;1" dur="9.0s" repeatCount="indefinite"/></rect><rect x="372" y="150" width="56" height="40" rx="4" fill="none" stroke="#22c55e" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.5;0.5;1;1" dur="9.0s" repeatCount="indefinite"/></rect><path d="M604 204 L400 204" stroke="#22c55e" stroke-width="2" stroke-dasharray="204" stroke-dashoffset="204" fill="none"><animate attributeName="stroke-dashoffset" values="204;204;0;0;204" keyTimes="0;0.4;0.5;1;1" dur="9.0s" repeatCount="indefinite"/></path><text x="372" y="236" class="mono" font-size="11" fill="#8b8b8b">parent_hash(N+1) = hash(N)</text><text x="372" y="279" class="sans" font-size="13" fill="#8b8b8b">at most 512 headers per package</text><rect x="676" y="24" width="300" height="282" rx="6" fill="#111111" stroke="#262626"/><text x="698" y="56" class="mono" font-size="11" fill="#8b8b8b" letter-spacing="1.5">03</text><text x="698" y="84" class="serif" font-size="21" fill="#f5f5f4">Transaction in the tree</text><text x="698" y="106" class="sans" font-size="12.5" fill="#8b8b8b">sibling hashes up to the header's tx root</text><line x1="826" y1="142" x2="766" y2="182" stroke="#3a3a3a" stroke-width="1.2"/><line x1="826" y1="142" x2="886" y2="182" stroke="#3a3a3a" stroke-width="1.2"/><line x1="766" y1="182" x2="736" y2="222" stroke="#3a3a3a" stroke-width="1.2"/><line x1="766" y1="182" x2="796" y2="222" stroke="#3a3a3a" stroke-width="1.2"/><line x1="886" y1="182" x2="856" y2="222" stroke="#3a3a3a" stroke-width="1.2"/><line x1="886" y1="182" x2="916" y2="222" stroke="#3a3a3a" stroke-width="1.2"/><circle cx="826" cy="142" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="766" cy="182" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="886" cy="182" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="736" cy="222" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="796" cy="222" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="856" cy="222" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="916" cy="222" r="7" fill="#161616" stroke="#4a4a4a" stroke-width="1.2"/><circle cx="736" cy="222" r="7" fill="#d8a7b8" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.6;0.7;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="886" cy="182" r="7" fill="#d8a7b8" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.7;0.7;1;1" dur="9.0s" repeatCount="indefinite"/></circle><path d="M796 222 L766 182 L826 142" stroke="#22c55e" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-dasharray="122.1" stroke-dashoffset="122.1"><animate attributeName="stroke-dashoffset" values="122.1;122.1;0;0;122.1" keyTimes="0;0.6;0.7;1;1" dur="9.0s" repeatCount="indefinite"/></path><circle cx="796" cy="222" r="7" fill="#22c55e"/><circle cx="766" cy="182" r="7" fill="#22c55e" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.7;0.7;1;1" dur="9.0s" repeatCount="indefinite"/></circle><circle cx="826" cy="142" r="7" fill="#22c55e" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.7;0.8;1;1" dur="9.0s" repeatCount="indefinite"/></circle><text x="796" y="246" text-anchor="middle" class="mono" font-size="11" fill="#f5f5f4">your tx</text><text x="840" y="146" class="mono" font-size="11" fill="#8b8b8b">tx root</text><g opacity="0"><animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.8;0.8;1;1" dur="9.0s" repeatCount="indefinite"/><circle cx="706" cy="274" r="8" fill="#22c55e"/><path d="M702 274 l3 3 l5 -6" stroke="#0a0a0a" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="722" y="279" class="sans" font-size="13" font-weight="600" fill="#f5f5f4">no trust in the server needed</text></g>
 </svg>

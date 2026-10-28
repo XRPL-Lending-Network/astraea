@@ -1,99 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" width="1200" height="460" role="img" aria-labelledby="t d">
   <title id="t">Astraea</title>
-  <desc id="d">Validator signatures converge into a chain of ledgers that keeps moving forward.</desc>
+  <desc id="d">XRPL history you can check yourself. A dotted globe turns slowly while ledgers climb its meridians to the pole, where validators agree on them.</desc>
   <style>
-    .bg { fill: #f6f8fb; }
-    .ink { fill: #0f1b2d; }
-    .muted { fill: #51607a; }
-    .star { fill: #2f6fec; }
-    .line { stroke: #2f6fec; stroke-opacity: .28; stroke-width: 1.2; fill: none; }
-    .block { fill: #ffffff; stroke: #2f6fec; stroke-width: 1.5; }
-    .block-text { fill: #2f6fec; font: 600 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .link { stroke: #2f6fec; stroke-width: 1.5; stroke-dasharray: 4 4; }
-    .pulse { fill: #f0b429; }
-    .title { font: 700 64px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; letter-spacing: -1px; }
-    .tag { font: 400 20px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
-    @media (prefers-color-scheme: dark) {
-      .bg { fill: #0b1220; }
-      .ink { fill: #eef3ff; }
-      .muted { fill: #9fb0cc; }
-      .star { fill: #7aa7ff; }
-      .line { stroke: #7aa7ff; }
-      .block { fill: #111b2e; stroke: #7aa7ff; }
-      .block-text { fill: #a9c4ff; }
-      .link { stroke: #7aa7ff; }
-    }
-    .tw { animation: tw 3.2s ease-in-out infinite; }
-    .tw2 { animation: tw 4.1s ease-in-out infinite .8s; }
-    .tw3 { animation: tw 2.7s ease-in-out infinite 1.6s; }
-    @keyframes tw { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-    .chain { animation: slide 12s linear infinite; }
-    @keyframes slide { from { transform: translateX(0); } to { transform: translateX(-300px); } }
-    @media (prefers-reduced-motion: reduce) {
-      .tw, .tw2, .tw3, .chain { animation: none; }
-    }
+    .serif { font-family: 'Tiempos Headline','Iowan Old Style','Palatino Linotype',Palatino,Georgia,'Times New Roman',serif; }
+    .sans { font-family: Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; }
+    .mono { font-family: ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace; }
+    @media (prefers-reduced-motion: reduce) { .m { animation: none !important; } }
+
+    .wire { fill: none; stroke: url(#globe); stroke-width: .7; opacity: .3; }
+    .dots { fill: none; stroke: url(#globe); stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 0 14; animation: crawl 3.5s linear infinite; }
+    @keyframes crawl { to { stroke-dashoffset: -28; } }
   </style>
-
-  <rect class="bg" width="1200" height="340" rx="16"/>
-
-  <!-- Wordmark -->
-  <text class="title ink" x="64" y="150">Astraea</text>
-  <text class="tag muted" x="66" y="190">XRPL history you can check yourself.</text>
-  <text class="tag muted" x="66" y="218" style="font-size:16px">Clio-compatible API · full ledger history · proofs backed by validator signatures</text>
-
-  <!-- Constellation: validators on the right -->
-  <g>
-    <path class="line" d="M700 60 L790 40 L880 74 L960 48 L1050 88 L1120 56"/>
-    <path class="line" d="M790 40 L840 120 L880 74 M960 48 L1000 130 L1050 88 M840 120 L1000 130"/>
-    <circle class="star tw"  cx="700"  cy="60"  r="4"/>
-    <circle class="star tw2" cx="790"  cy="40"  r="5"/>
-    <circle class="star tw3" cx="880"  cy="74"  r="4"/>
-    <circle class="star tw"  cx="960"  cy="48"  r="5"/>
-    <circle class="star tw2" cx="1050" cy="88"  r="4"/>
-    <circle class="star tw3" cx="1120" cy="56"  r="4"/>
-    <circle class="star tw2" cx="840"  cy="120" r="3.5"/>
-    <circle class="star tw"  cx="1000" cy="130" r="3.5"/>
+  <defs>
+    <linearGradient id="globe" gradientUnits="userSpaceOnUse" x1="605" y1="0" x2="1205" y2="0">
+      <stop offset=".1" stop-color="#d8a7b8"/>
+      <stop offset=".55" stop-color="#b9c4a8"/>
+      <stop offset=".95" stop-color="#4ade80"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="905" cy="200" r="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4ade80" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#4ade80" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0a0a" stop-opacity="0"/>
+      <stop offset="1" stop-color="#0a0a0a" stop-opacity="1"/>
+    </linearGradient>
+    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#0a0a0a" stop-opacity="1"/>
+      <stop offset="1" stop-color="#0a0a0a" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="card"><rect width="1200" height="460" rx="16"/></clipPath>
+  </defs>
+  <rect width="1200" height="460" rx="16" fill="#0a0a0a"/>
+  <g clip-path="url(#card)">
+    <g><ellipse cx="905" cy="500" rx="300" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="0s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="300" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="0s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="295.4" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-2s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="295.4" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-2s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="281.9" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-4s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="281.9" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-4s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="259.8" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-6s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="259.8" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-6s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="229.8" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-8s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="229.8" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-8s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="192.8" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-10s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="192.8" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-10s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="150" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-12s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="150" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-12s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="102.6" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-14s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="102.6" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-14s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="52.1" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-16s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="52.1" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-16s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="0" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-18s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="0" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-18s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="52.1" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-20s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="52.1" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-20s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="102.6" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-22s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="102.6" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-22s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="150" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-24s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="150" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-24s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="192.8" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-26s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="192.8" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-26s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="229.8" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-28s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="229.8" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-28s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="259.8" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-30s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="259.8" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-30s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="281.9" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-32s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="281.9" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-32s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="295.4" ry="300" class="wire"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-34s" repeatCount="indefinite"/></ellipse><ellipse cx="905" cy="500" rx="295.4" ry="300" class="dots m"><animate attributeName="rx" values="300;297.4;289.8;277.2;259.8;238;212.1;182.6;150;114.8;77.6;39.2;0;39.2;77.6;114.8;150;182.6;212.1;238;259.8;277.2;289.8;297.4;300" dur="36s" begin="-34s" repeatCount="indefinite"/></ellipse></g>
+    <circle cx="905" cy="200" r="44" fill="url(#glow)"/>
+    <circle cx="905" cy="200" r="4" fill="none" stroke="#4ade80" stroke-width="1.2"><animate attributeName="r" values="3;26" dur="2.1s" begin="0s" repeatCount="indefinite"/><animate attributeName="opacity" values=".9;0" dur="2.1s" begin="0s" repeatCount="indefinite"/></circle><circle cx="905" cy="200" r="4" fill="none" stroke="#4ade80" stroke-width="1.2"><animate attributeName="r" values="3;26" dur="2.1s" begin="1.1s" repeatCount="indefinite"/><animate attributeName="opacity" values=".9;0" dur="2.1s" begin="1.1s" repeatCount="indefinite"/></circle>
+    <g><circle r="3" fill="#d8a7b8" opacity="0"><animateMotion path="M659 500 A246 300 0 0 1 905 200" dur="4.2s" begin="0s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="0s" repeatCount="indefinite"/></circle><circle r="3" fill="#facc15" opacity="0"><animateMotion path="M770 500 A135 300 0 0 1 905 200" dur="4.2s" begin="0.6s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="0.6s" repeatCount="indefinite"/></circle><circle r="3" fill="#f5f5f4" opacity="0"><animateMotion path="M905 500 L905 200" dur="4.2s" begin="1.2s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="1.2s" repeatCount="indefinite"/></circle><circle r="3" fill="#3b82f6" opacity="0"><animateMotion path="M1019 500 A114 300 0 0 0 905 200" dur="4.2s" begin="1.8s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="1.8s" repeatCount="indefinite"/></circle><circle r="3" fill="#22c55e" opacity="0"><animateMotion path="M1127 500 A222 300 0 0 0 905 200" dur="4.2s" begin="2.4s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="2.4s" repeatCount="indefinite"/></circle><circle r="3" fill="#8b5cf6" opacity="0"><animateMotion path="M719 500 A186 300 0 0 1 905 200" dur="4.2s" begin="3s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="3s" repeatCount="indefinite"/></circle><circle r="3" fill="#fb7185" opacity="0"><animateMotion path="M1079 500 A174 300 0 0 0 905 200" dur="4.2s" begin="3.6s" repeatCount="indefinite" keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="4.2s" begin="3.6s" repeatCount="indefinite"/></circle></g>
+    <rect x="0" y="370" width="1200" height="90" fill="url(#fade)"/>
+    <rect x="0" y="0" width="600" height="460" fill="url(#side)" opacity=".9"/>
   </g>
+  <rect x=".5" y=".5" width="1199" height="459" rx="15.5" fill="none" stroke="#1d1d1d"/>
 
-  <!-- Signatures falling from validators to the newest ledger -->
-  <g>
-    <circle class="pulse" r="3.5">
-      <animateMotion dur="2.4s" repeatCount="indefinite" path="M790 40 C800 140 900 200 1010 250"/>
-      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" repeatCount="indefinite"/>
-    </circle>
-    <circle class="pulse" r="3.5">
-      <animateMotion dur="2.4s" begin=".6s" repeatCount="indefinite" path="M960 48 C980 140 1000 200 1010 250"/>
-      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" begin=".6s" repeatCount="indefinite"/>
-    </circle>
-    <circle class="pulse" r="3.5">
-      <animateMotion dur="2.4s" begin="1.2s" repeatCount="indefinite" path="M1120 56 C1100 150 1050 210 1010 250"/>
-      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" begin="1.2s" repeatCount="indefinite"/>
-    </circle>
-    <circle class="pulse" r="3.5">
-      <animateMotion dur="2.4s" begin="1.8s" repeatCount="indefinite" path="M880 74 C900 160 960 220 1010 250"/>
-      <animate attributeName="opacity" values="0;1;1;0" dur="2.4s" begin="1.8s" repeatCount="indefinite"/>
-    </circle>
-  </g>
+  <g transform="translate(84 64) scale(1.0)"><path d="M-6 -6 L6 6 M6 -6 L-6 6" stroke="#f5f5f4" stroke-width="1.8" stroke-linecap="round"/><circle cx="-9" cy="-12" r="2.4" fill="#d946ef"/><circle cx="9" cy="-12" r="2.4" fill="#3b82f6"/><circle cx="-15" cy="0" r="2.4" fill="#facc15"/><circle cx="15" cy="0" r="2.4" fill="#22c55e"/><circle cx="-9" cy="12" r="2.4" fill="#fb7185"/><circle cx="9" cy="12" r="2.4" fill="#8b5cf6"/></g>
+  <text x="110" y="69" class="sans" font-size="13" font-weight="700" letter-spacing="1" fill="#f5f5f4">XRP LEDGER</text>
+  <line x1="210" y1="57" x2="210" y2="72" stroke="#8b8b8b"/>
+  <text x="222" y="69" class="sans" font-size="12" font-weight="500" letter-spacing="3.2" fill="#f5f5f4">ASTRAEA</text>
 
-  <!-- Ledger chain scrolling left -->
-  <clipPath id="lane"><rect x="40" y="240" width="1120" height="70"/></clipPath>
-  <g clip-path="url(#lane)">
-    <g class="chain">
-      <g id="blk">
-        <rect class="block" x="0" y="250" width="110" height="44" rx="8"/>
-      </g>
-      <use href="#blk" x="64"/><use href="#blk" x="214"/><use href="#blk" x="364"/><use href="#blk" x="514"/><use href="#blk" x="664"/><use href="#blk" x="814"/><use href="#blk" x="964"/><use href="#blk" x="1114"/><use href="#blk" x="1264"/><use href="#blk" x="1414"/>
-      <line class="link" x1="174" y1="272" x2="214" y2="272"/><line class="link" x1="324" y1="272" x2="364" y2="272"/><line class="link" x1="474" y1="272" x2="514" y2="272"/><line class="link" x1="624" y1="272" x2="664" y2="272"/><line class="link" x1="774" y1="272" x2="814" y2="272"/><line class="link" x1="924" y1="272" x2="964" y2="272"/><line class="link" x1="1074" y1="272" x2="1114" y2="272"/><line class="link" x1="1224" y1="272" x2="1264" y2="272"/><line class="link" x1="1374" y1="272" x2="1414" y2="272"/>
-      <text class="block-text" x="80" y="277">parent ✓</text>
-      <text class="block-text" x="230" y="277">tx root ✓</text>
-      <text class="block-text" x="380" y="277">parent ✓</text>
-      <text class="block-text" x="530" y="277">tx root ✓</text>
-      <text class="block-text" x="680" y="277">parent ✓</text>
-      <text class="block-text" x="830" y="277">tx root ✓</text>
-      <text class="block-text" x="980" y="277">parent ✓</text>
-      <text class="block-text" x="1130" y="277">tx root ✓</text>
-      <text class="block-text" x="1280" y="277">parent ✓</text>
-      <text class="block-text" x="1430" y="277">tx root ✓</text>
-    </g>
-  </g>
+  <text x="62" y="186" class="serif" font-size="56" fill="#f5f5f4" letter-spacing="-.5">XRPL history</text>
+  <text x="62" y="250" class="serif" font-size="56" fill="#f5f5f4" letter-spacing="-.5">you can check yourself</text>
+  <text x="64" y="298" class="sans" font-size="16" fill="#8b8b8b">A Clio-compatible history server with proofs backed by validator signatures.</text>
+  <text x="64" y="392" class="sans" font-size="13" fill="#8b8b8b">History from ledger</text><text x="64" y="418" class="sans" font-size="20" fill="#f5f5f4">32,571</text><text x="242" y="392" class="sans" font-size="13" fill="#8b8b8b">Confirmed by</text><text x="242" y="418" class="sans" font-size="20" fill="#f5f5f4">80% of the UNL</text><text x="420" y="392" class="sans" font-size="13" fill="#8b8b8b">Cold storage</text><text x="420" y="418" class="sans" font-size="20" fill="#f5f5f4">~240 B / tx</text>
 </svg>
