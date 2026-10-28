@@ -1244,6 +1244,13 @@ impl Engine {
 /// TransactionIndex from metadata.
 fn tx_index_of(meta: &[u8]) -> Option<u32> {
     use witness_core::stobject::{self, FieldId, types};
+    // Canonical metadata starts with TransactionIndex (UInt32 is the lowest
+    // type in it): header 0x20 0x1C, then the value. Parsing all fields walks
+    // AffectedNodes, and a cold account_tx page does that for every
+    // transaction of every ledger it reads. Anything else is parsed in full.
+    if let [0x20, 0x1C, a, b, c, d, ..] = *meta {
+        return Some(u32::from_be_bytes([a, b, c, d]));
+    }
     let fs = stobject::fields(meta).ok()?;
     stobject::find(&fs, FieldId::new(types::UINT32, 28)).and_then(stobject::u32_of)
 }
@@ -1416,6 +1423,27 @@ fn nft_synthetic(tt: &str, tx: &Map<String, Value>, meta: &mut Map<String, Value
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_index_read_from_the_header_matches_a_full_parse() {
+        use witness_core::stobject::{self, FieldId, types};
+        let full = |m: &[u8]| {
+            stobject::find(
+                &stobject::fields(m).unwrap(),
+                FieldId::new(types::UINT32, 28),
+            )
+            .and_then(stobject::u32_of)
+        };
+        // TransactionIndex 7, TransactionResult tesSUCCESS, empty AffectedNodes.
+        let meta = [0x20, 0x1C, 0, 0, 0, 7, 0x03, 0x10, 0x00, 0xF8, 0xF1];
+        assert_eq!(tx_index_of(&meta), Some(7));
+        assert_eq!(tx_index_of(&meta), full(&meta));
+        // Without TransactionIndex up front the full parse decides.
+        let other = [0x03, 0x10, 0x00, 0xF8, 0xF1];
+        assert_eq!(tx_index_of(&other), full(&other));
+        assert_eq!(tx_index_of(&other), None);
+        assert_eq!(tx_index_of(&[0x20, 0x1C, 0]), None);
+    }
 
     #[test]
     fn marker_at_the_edges() {
