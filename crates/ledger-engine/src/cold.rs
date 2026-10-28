@@ -28,10 +28,12 @@
 //! segments), and the seal keeps the result: a block whose stored bytes match
 //! its digest is prepared without repeating it. A block that doesn't match, or
 //! a segment without a seal, is checked in full on every load. The seal is not
-//! in the manifest; a damaged one only costs speed. A segment's cache holds `BLOCK_BUDGET` bytes of blocks,
-//! different blocks are prepared in parallel (at most `PREPARES` at once), and a
-//! block wanted by concurrent requests is prepared only once. At most `COLD_OPEN`
-//! segments are open; the least recently read ones are closed. A request for
+//! in the manifest; a damaged one only costs speed. A segment's cache holds up to
+//! `BLOCK_BUDGET` bytes of blocks, different blocks are prepared in parallel (at
+//! most `PREPARES` at once), and a block wanted by concurrent requests is
+//! prepared only once. The cache as a whole holds `COLD_BUDGET` bytes: past
+//! that, and past `COLD_OPEN` open segments, the least recently read segments
+//! are closed. A request for
 //! many ledgers at once (`Cold::ledgers`) reads them block by block on up to
 //! `COLD_READERS` threads.
 
@@ -77,15 +79,19 @@ impl Default for BlockLimit {
 }
 /// Maximum number of cold segments open at once. One account_tx page over
 /// full history touches many segments; with too few open they are closed
-/// and reopened on every request.
-pub const COLD_OPEN: usize = 16;
-/// Byte budget for prepared blocks in an open segment's cache (codec
-/// estimate), and the number of concurrent prepares per segment. Together
-/// with `COLD_OPEN` this caps the cold cache at about 1 GiB. A block takes
-/// about 30 ms to prepare, and one account_tx page can need dozens of blocks
-/// from a single segment, so a segment prepares as many at once as one
-/// request reads in parallel.
-pub const BLOCK_BUDGET: usize = 64 << 20;
+/// and reopened on every request. An open segment without cached blocks
+/// costs little.
+pub const COLD_OPEN: usize = 64;
+/// Byte budget for the prepared blocks of all open segments (codec estimate).
+/// Shared rather than split per segment: a busy account's page can need a
+/// few dozen blocks of about 7 MB from one segment, while most open segments
+/// hold one or two.
+pub const COLD_BUDGET: usize = 1 << 30;
+/// Most of the cold cache one segment may hold, and the number of concurrent
+/// prepares per segment. A block takes about 10 ms to prepare, and one
+/// account_tx page can need dozens of blocks from a single segment, so a
+/// segment prepares as many at once as one request reads in parallel.
+pub const BLOCK_BUDGET: usize = 256 << 20;
 pub const PREPARES: usize = COLD_READERS;
 /// Threads one `Cold::ledgers` call reads with.
 pub const COLD_READERS: usize = 8;
@@ -645,6 +651,8 @@ pub struct Cold {
     recent: Arc<Mutex<VecDeque<Arc<ColdSegment>>>>,
     /// How many segments may be open at once (`COLD_OPEN`).
     open_limit: usize,
+    /// Bytes of prepared blocks all open segments may hold (`COLD_BUDGET`).
+    cache_budget: usize,
 }
 
 impl Default for Cold {
@@ -653,6 +661,7 @@ impl Default for Cold {
             segments: Vec::new(),
             recent: Arc::default(),
             open_limit: COLD_OPEN,
+            cache_budget: COLD_BUDGET,
         }
     }
 }
@@ -669,6 +678,7 @@ impl Cold {
             segments: ColdSegment::scan_with(dir, &prev.segments)?,
             recent: prev.recent.clone(),
             open_limit: prev.open_limit,
+            cache_budget: prev.cache_budget,
         })
     }
 
@@ -709,6 +719,12 @@ impl Cold {
     /// Same segments with a different open limit (tests use a small one).
     pub fn with_open_limit(mut self, n: usize) -> Cold {
         self.open_limit = n.max(1);
+        self
+    }
+
+    /// Same segments with a different budget for the whole block cache.
+    pub fn with_cache_budget(mut self, bytes: usize) -> Cold {
+        self.cache_budget = bytes;
         self
     }
 
@@ -804,7 +820,9 @@ impl Cold {
         // Open budget: a slot is freed and the segment is opened under the
         // shared lock, before reading, so there are never more than `COLD_OPEN` open.
         // The read itself happens outside the lock; reads already running on a closed
-        // segment finish with their own instance.
+        // segment finish with their own instance. Then the byte budget: while the
+        // cache as a whole is over it, the least recently read segments other than
+        // this one are closed.
         let o = {
             let mut r = self.recent.lock().unwrap_or_else(|p| p.into_inner());
             r.retain(|s| !Arc::ptr_eq(s, seg));
@@ -816,6 +834,12 @@ impl Cold {
             }
             let o = seg.opened()?;
             r.push_back(seg.clone());
+            let mut total = r.iter().map(|s| s.cached_bytes()).sum::<usize>();
+            while total > self.cache_budget && r.len() > 1 {
+                let Some(s) = r.pop_front() else { break };
+                total -= s.cached_bytes().min(total);
+                s.close();
+            }
             o
         };
         Ok((seg, o))
@@ -999,6 +1023,28 @@ pub(crate) mod tests {
         let mut bad = chain(50, 1);
         bad[0].changes[0].change = Change::Deleted;
         assert!(write(dir.path(), &bad, Kinds::Explicit).is_err());
+    }
+
+    #[test]
+    fn cache_budget_is_shared_by_open_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in [10u32, 20, 30] {
+            write(dir.path(), &chain(f, 5), Kinds::Explicit).unwrap();
+        }
+        // A roomy budget keeps every segment and its blocks.
+        let cold = Cold::open(dir.path()).unwrap();
+        for s in [10u32, 20, 30] {
+            cold.ledger(s, false).unwrap().unwrap();
+        }
+        assert_eq!(cold.open_count(), 3);
+        assert!(cold.segments().iter().all(|s| s.cached_bytes() > 0));
+        // A tiny one: opening the next segment closes the older ones, whatever
+        // the open limit, and reads still work.
+        let cold = Cold::open(dir.path()).unwrap().with_cache_budget(1);
+        for s in [10u32, 20, 30, 11] {
+            assert!(cold.ledger(s, false).unwrap().is_some());
+            assert_eq!(cold.open_count(), 1);
+        }
     }
 
     #[test]
