@@ -8,6 +8,8 @@
 //! - `cold-F.asix`: the codec's four ASIX2 indexes: transaction and ledger by
 //!   hash, account history and object history;
 //! - `cold-F.kinds`: the kind of every state change (`XWCK\0\1`);
+//! - `cold-F.seal`: optional, a digest of every block's stored bytes taken
+//!   after the block passed the full check (`XWCS\0\1`), see below;
 //! - `cold-F.json`: the manifest with range, profile, change kind mode,
 //!   and size and SHA-512Half of every file. Written last, via a temporary
 //!   file and rename: without a manifest there is no segment.
@@ -21,7 +23,12 @@
 //!
 //! Reading goes through the codec's pool of prepared blocks (`astj5::pool`): before
 //! a block enters the cache, its SHA-512Half, the transaction roots and the
-//! header chain are checked. A segment's cache holds `BLOCK_BUDGET` bytes of blocks,
+//! header chain are checked. The check costs as much as preparing the block,
+//! so it runs once, when the segment is written (or by `write_seal` for older
+//! segments), and the seal keeps the result: a block whose stored bytes match
+//! its digest is prepared without repeating it. A block that doesn't match, or
+//! a segment without a seal, is checked in full on every load. The seal is not
+//! in the manifest; a damaged one only costs speed. A segment's cache holds `BLOCK_BUDGET` bytes of blocks,
 //! different blocks are prepared in parallel (at most `PREPARES` at once), and a
 //! block wanted by concurrent requests is prepared only once. At most `COLD_OPEN`
 //! segments are open; the least recently read ones are closed. A request for
@@ -44,6 +51,7 @@ use crate::ledger::{Change, Ledger, StateChange};
 type Res<T> = Result<T, String>;
 
 const KINDS_MAGIC: &[u8; 6] = b"XWCK\x00\x01";
+const SEAL_MAGIC: &[u8; 6] = b"XWCS\x00\x01";
 /// Default archive block: at most this many ledgers and exact bytes.
 /// The research's canonical profile uses 16 MiB. 4 MiB costs +18.7% in size
 /// at the 104 million epoch and +26% on recent history, but a cold read takes
@@ -250,6 +258,25 @@ pub(crate) fn sync_write(path: &Path, bytes: &[u8]) -> Res<()> {
     fs::rename(&tmp, path).map_err(io)
 }
 
+fn seal_bytes(seal: &[[u8; 32]]) -> Vec<u8> {
+    let mut out = SEAL_MAGIC.to_vec();
+    out.extend((seal.len() as u32).to_le_bytes());
+    for d in seal {
+        out.extend(d);
+    }
+    out
+}
+
+fn parse_seal(b: &[u8]) -> Option<Vec<[u8; 32]>> {
+    let rest = b.strip_prefix(SEAL_MAGIC)?;
+    let n = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+    let body = &rest[4..];
+    if body.len() != n.checked_mul(32)? {
+        return None;
+    }
+    Some(body.as_chunks::<32>().0.to_vec())
+}
+
 fn names(dir: &Path, first: u32) -> [PathBuf; 4] {
     ["astj", "asix", "kinds", "json"].map(|e| dir.join(format!("cold-{first:010}.{e}")))
 }
@@ -338,6 +365,11 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
     sync_write(&pa, &archive)?;
     sync_write(&pi, &index)?;
     sync_write(&pk, &kinds)?;
+    // The full check of every block, once; readers then trust the seal.
+    let seal = Pool::open(&pa, 0, 1)
+        .and_then(|p| p.seal(COLD_READERS))
+        .map_err(corrupt)?;
+    sync_write(&pa.with_extension("seal"), &seal_bytes(&seal))?;
     let m = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
     sync_write(&pm, &m)?;
     File::open(dir).and_then(|d| d.sync_all()).map_err(io)?;
@@ -461,6 +493,33 @@ impl ColdSegment {
         self.lock().is_some()
     }
 
+    fn seal_path(&self) -> PathBuf {
+        self.paths[0].with_extension("seal")
+    }
+
+    /// Whether the segment has a seal file.
+    pub fn sealed(&self) -> bool {
+        self.seal_path().exists()
+    }
+
+    /// Checks every block in full and writes the seal next to the archive
+    /// file. If the archive is a link, the seal goes next to its target and
+    /// gets a link here. Takes effect from the next time the segment is opened.
+    pub fn write_seal(&self, threads: usize) -> Res<PathBuf> {
+        let seal = Pool::open(&self.paths[0], 0, 1)
+            .and_then(|p| p.seal(threads))
+            .map_err(corrupt)?;
+        let real = fs::canonicalize(&self.paths[0])
+            .map_err(io)?
+            .with_extension("seal");
+        sync_write(&real, &seal_bytes(&seal))?;
+        let here = self.seal_path();
+        if real != here && fs::symlink_metadata(&here).is_err() {
+            std::os::unix::fs::symlink(&real, &here).map_err(io)?;
+        }
+        Ok(real)
+    }
+
     /// Closes the files and frees the block cache; reads in progress finish.
     pub fn close(&self) {
         *self.lock() = None;
@@ -477,7 +536,11 @@ impl ColdSegment {
             return Ok(o.clone());
         }
         let budget = self.budget.load(std::sync::atomic::Ordering::Relaxed);
-        let pool = Pool::open(&self.paths[0], budget, PREPARES).map_err(corrupt)?;
+        let mut pool = Pool::open(&self.paths[0], budget, PREPARES).map_err(corrupt)?;
+        // Without a usable seal every block is checked in full, as before.
+        if let Some(seal) = fs::read(self.seal_path()).ok().and_then(|b| parse_seal(&b)) {
+            let _ = pool.set_seal(seal);
+        }
         if pool.first() != Some(self.first) {
             return Err(corrupt(
                 "archive does not start at the manifest's first ledger",
@@ -865,6 +928,49 @@ pub(crate) mod tests {
         }
         assert!(cold.open_count() <= 2);
         assert!(cold.ledgers(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn segments_are_sealed_and_read_without_a_usable_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let ls = chain(300, 9);
+        let small = BlockLimit {
+            ledgers: 4,
+            raw: 1 << 20,
+        };
+        write_with(dir.path(), &ls, Kinds::Explicit, small).unwrap();
+        let seal = dir.path().join("cold-0000000300.seal");
+        assert_eq!(parse_seal(&fs::read(&seal).unwrap()).unwrap().len(), 3);
+        let read_all = |dir: &Path| {
+            let cold = Cold::open(dir).unwrap();
+            for l in &ls {
+                let seq = l.header().unwrap().sequence;
+                assert_eq!(cold.ledger(seq, true).unwrap().unwrap(), *l);
+            }
+        };
+        read_all(dir.path());
+        fs::write(&seal, b"XWCS\x00\x01junk").unwrap();
+        read_all(dir.path());
+        fs::remove_file(&seal).unwrap();
+        read_all(dir.path());
+        // An older segment published through links gets its seal next to the
+        // archive and a link beside the published one.
+        let live = tempfile::tempdir().unwrap();
+        for e in ["astj", "asix", "kinds", "json"] {
+            let n = format!("cold-0000000300.{e}");
+            std::os::unix::fs::symlink(dir.path().join(&n), live.path().join(&n)).unwrap();
+        }
+        let cold = Cold::open(live.path()).unwrap();
+        assert!(!cold.segments()[0].sealed());
+        cold.segments()[0].write_seal(2).unwrap();
+        assert!(seal.exists() && cold.segments()[0].sealed());
+        assert!(
+            fs::symlink_metadata(live.path().join("cold-0000000300.seal"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        read_all(live.path());
     }
 
     #[test]

@@ -10,6 +10,12 @@
 //! a block is cached is the same as in `dense::Reader`: exact framing hashed
 //! one ledger at a time against the directory SHA512Half, ledger sequence,
 //! transaction roots and the internal parent chain.
+//!
+//! That check costs about as much as preparing the block. A seal
+//! (`Pool::seal`) records, for every block that passed it, a digest of the
+//! stored block bytes. With a seal set (`set_seal`), a block whose bytes still
+//! match its digest is prepared without repeating the check; any other block is
+//! checked in full as before.
 use super::*;
 use sha2::{Digest, Sha512};
 use std::os::unix::fs::FileExt;
@@ -33,6 +39,15 @@ pub struct Pool {
     preparing: (Mutex<usize>, Condvar),
     max_prepares: usize,
     loads: std::sync::atomic::AtomicUsize,
+    seal: Vec<[u8; 32]>,
+}
+/// Digest of a checked block in a seal: the directory hash and the stored bytes.
+fn seal_digest(hash: &[u8; 32], payload: &[u8]) -> [u8; 32] {
+    let mut h = Sha512::new();
+    h.update(b"XWCS");
+    h.update(hash);
+    h.update(payload);
+    h.finalize()[..32].try_into().unwrap()
 }
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -72,7 +87,55 @@ impl Pool {
             preparing: (Mutex::new(0), Condvar::new()),
             max_prepares: max_prepares.max(1),
             loads: std::sync::atomic::AtomicUsize::new(0),
+            seal: Vec::new(),
         })
+    }
+    /// Checks every block in full, on up to `threads` threads, and returns
+    /// the seal: one digest per block, in directory order.
+    pub fn seal(&self, threads: usize) -> Res<Vec<[u8; 32]>> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let n = self.entries.len();
+        let parts = std::thread::scope(|sc| {
+            let workers: Vec<_> = (0..threads.clamp(1, n.max(1)))
+                .map(|_| {
+                    sc.spawn(|| -> Res<Vec<(usize, [u8; 32])>> {
+                        let mut got = vec![];
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= n {
+                                return Ok(got);
+                            }
+                            let payload = self.payload(i)?;
+                            self.decode(i, &payload, false)?;
+                            got.push((i, seal_digest(&self.entries[i].hash, &payload)));
+                        }
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| {
+                    w.join()
+                        .unwrap_or_else(|_| Err("seal worker panicked".into()))
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut out = vec![[0u8; 32]; n];
+        for p in parts {
+            for (i, d) in p? {
+                out[i] = d;
+            }
+        }
+        Ok(out)
+    }
+    /// Sets the seal from `seal` (as returned by `seal` for this archive). A
+    /// seal with the wrong number of digests is refused.
+    pub fn set_seal(&mut self, seal: Vec<[u8; 32]>) -> Res<()> {
+        if seal.len() != self.entries.len() {
+            return Err("seal does not match the archive's blocks".into());
+        }
+        self.seal = seal;
+        Ok(())
     }
     pub fn first(&self) -> Option<u32> {
         self.entries.first().map(|e| e.first)
@@ -123,17 +186,42 @@ impl Pool {
         out
     }
     fn load_inner(&self, i: usize) -> Res<Data> {
+        let payload = self.payload(i)?;
+        let sealed = self
+            .seal
+            .get(i)
+            .is_some_and(|d| *d == seal_digest(&self.entries[i].hash, &payload));
+        let data = self.decode(i, &payload, sealed)?;
+        self.loads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(data)
+    }
+    fn payload(&self, i: usize) -> Res<Vec<u8>> {
         let e = &self.entries[i];
         let mut payload = vec![0; e.length];
         self.file
             .read_exact_at(&mut payload, e.offset)
             .map_err(er)?;
-        let mut p = Read::new(&payload);
+        Ok(payload)
+    }
+    /// Block `i` from its stored bytes. `sealed`: the bytes match a seal digest,
+    /// so only the framing is checked, not the hashes, roots and chain.
+    fn decode(&self, i: usize, payload: &[u8], sealed: bool) -> Res<Data> {
+        let e = &self.entries[i];
+        let mut p = Read::new(payload);
         let data = match p.byte()? {
             1 => {
                 let mut f = fast::Prepared::for_read(&payload[1..])?;
                 if f.layout.len() != e.count {
                     return Err("block count".into());
+                }
+                if sealed {
+                    for (k, l) in f.layout.iter().enumerate() {
+                        if l.seq != e.first.checked_add(k as u32).ok_or("sequence overflow")? {
+                            return Err("block sequence".into());
+                        }
+                    }
+                    return Ok(Data::Prepared(Box::new(f)));
                 }
                 let mut hash = Sha512::new();
                 hash.update((e.count as u32).to_le_bytes());
@@ -167,19 +255,19 @@ impl Pool {
                     return Err("raw size".into());
                 }
                 let rows = load_rows(&raw)?;
-                if rows.len() != e.count
-                    || rows.first().is_none_or(|r| r.seq != e.first)
-                    || sha512_half(&raw) != e.hash
-                {
+                if rows.len() != e.count || rows.first().is_none_or(|r| r.seq != e.first) {
                     return Err("block identity".into());
                 }
-                verify(&rows)?;
+                if !sealed {
+                    if sha512_half(&raw) != e.hash {
+                        return Err("block identity".into());
+                    }
+                    verify(&rows)?;
+                }
                 Data::Rows(rows)
             }
             _ => return Err("block mode".into()),
         };
-        self.loads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(data)
     }
     /// Prepared block `i`, preparing it once for all concurrent callers.
@@ -362,6 +450,70 @@ mod tests {
             assert!(t.patches.is_empty() && !r.patches.is_empty());
         }
         assert!(pool.header(30).is_err() && pool.ledger_txs(9).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn seal_skips_the_check_only_for_unchanged_blocks() {
+        for opts in [
+            Options::default(),
+            Options {
+                joint: true,
+                ..Options::default()
+            },
+        ] {
+            let rs = rows(10, 24);
+            let (archive, _) = pack_bounded(&rs, 8, MAX, opts).unwrap();
+            let dir = std::env::temp_dir().join(format!(
+                "astj5-pool-seal-{}-{}",
+                std::process::id(),
+                opts.joint
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("a.astj");
+            std::fs::write(&path, &archive).unwrap();
+            let seal = Pool::open(&path, 1 << 20, 2).unwrap().seal(3).unwrap();
+            assert_eq!(seal.len(), 3);
+            let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
+            assert!(pool.set_seal(seal[..2].to_vec()).is_err());
+            pool.set_seal(seal.clone()).unwrap();
+            for r in &rs {
+                assert_eq!(pool.ledger(r.seq).unwrap(), *r);
+            }
+            // A changed byte in the middle block: its digest no longer matches,
+            // so the block is checked in full and fails.
+            let e = &pool.entries[1];
+            let mut bad = archive.clone();
+            bad[e.offset as usize + e.length - 1] ^= 1;
+            std::fs::write(&path, &bad).unwrap();
+            let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
+            pool.set_seal(seal.clone()).unwrap();
+            assert!(pool.ledger(10).is_ok() && pool.ledger(26).is_ok());
+            assert!(pool.ledger(18).is_err());
+            assert!(Pool::open(&path, 1 << 20, 2).unwrap().seal(2).is_err());
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+    #[test]
+    fn a_seal_is_trusted_for_the_bytes_it_names() {
+        // A wrong directory hash fails the full check; a digest over that hash
+        // and the stored bytes skips it, which is why only `seal` should
+        // produce one.
+        let rs = rows(10, 8);
+        let (archive, _) = pack_bounded(&rs, 8, MAX, Options::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("astj5-pool-trust-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.astj");
+        std::fs::write(&path, &archive).unwrap();
+        let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
+        pool.entries[0].hash = [0; 32];
+        assert!(pool.seal(1).is_err() && pool.ledger(12).is_err());
+        let e = &pool.entries[0];
+        let payload = archive[e.offset as usize..e.offset as usize + e.length].to_vec();
+        let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
+        pool.entries[0].hash = [0; 32];
+        pool.set_seal(vec![seal_digest(&[0; 32], &payload)])
+            .unwrap();
+        assert_eq!(pool.ledger(12).unwrap(), rs[2]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

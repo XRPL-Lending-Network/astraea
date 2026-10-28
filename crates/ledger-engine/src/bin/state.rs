@@ -117,6 +117,16 @@ enum Command {
         #[arg(long)]
         last: Option<u32>,
     },
+    /// Seal cold segments written before seals existed: check every block in
+    /// full once and record it, so readers don't repeat the check. Segments
+    /// that already have a seal are skipped unless `--force`.
+    HistoryColdSeal {
+        dir: PathBuf,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, default_value_t = 8)]
+        threads: usize,
+    },
     /// Check cold history indexes against the fjall indexes (`--db`) on the shared
     /// range: account history pages in both directions with marker, and transaction
     /// lookup by hash on a sample.
@@ -713,6 +723,26 @@ fn main() -> Result<(), String> {
                 b("xtxh") / tx,
                 b("xacc") / tx,
                 b("lgr") / tx,
+                t.elapsed().as_secs_f64()
+            );
+        }
+        Command::HistoryColdSeal {
+            dir,
+            force,
+            threads,
+        } => {
+            let cold = ledger_engine::cold::Cold::open(&dir)?;
+            let (mut sealed, mut skipped) = (0, 0);
+            for seg in cold.segments() {
+                if seg.sealed() && !force {
+                    skipped += 1;
+                    continue;
+                }
+                seg.write_seal(threads)?;
+                sealed += 1;
+            }
+            println!(
+                "sealed {sealed} cold segments, {skipped} already sealed, in {:.0} s",
                 t.elapsed().as_secs_f64()
             );
         }

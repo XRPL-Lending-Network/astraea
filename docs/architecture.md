@@ -25,16 +25,17 @@ Recent history and state live in the hot store under `<data-dir>`:
 
 ### Cold store
 
-Ledgers older than the state snapshot have transactions but no queryable state. They live in cold segments written in the ASTJ5 format (`crates/astj5`). A segment with first ledger `F` is four files:
+Ledgers older than the state snapshot have transactions but no queryable state. They live in cold segments written in the ASTJ5 format (`crates/astj5`). A segment with first ledger `F` is four files, plus an optional seal:
 
 | File | Contents |
 |---|---|
 | `cold-F.astj` | independent blocks of up to 1024 ledgers or 4 MiB, each with a SHA-512Half of its exact bytes |
 | `cold-F.asix` | ASIX2 indexes built by the codec |
 | `cold-F.kinds` | kind of each state change, when the source recorded it |
+| `cold-F.seal` | digest of each block's stored bytes, recorded after the block passed the full check |
 | `cold-F.json` | manifest: range, profile, sizes and hashes of the other files; written last |
 
-Every block is checked when it's loaded for reading: its hash, the transaction roots of its ledgers and the header chain. A damaged block becomes an error, never a wrong answer.
+Every block gets a full check: its hash, the transaction roots of its ledgers and the header chain. The check costs about as much as decoding the block, so it runs once, when the segment is written, and the seal records it. When a block is loaded for reading, the server hashes its stored bytes and compares them with the seal. If they match, the block is decoded without repeating the check. If they don't, or the segment has no seal, the block is checked in full again. A damaged block becomes an error, never a wrong answer. Segments written before seals existed can be sealed with `astraea-state history-cold-seal DIR`.
 
 Cold segments are grouped into index partitions (`coldidx-F.*`) for transaction-by-hash, account history and ledger-by-hash lookups. These are read straight from disk with positioned reads, so memory use doesn't grow with history.
 
