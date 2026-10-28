@@ -65,11 +65,41 @@ def logo_mark(x, y, s=1.0):
     return "".join(out)
 
 
+def wordmark(x, y, h=34.0, stroke=3.0, track=13.0):
+    """ASTRAEA drawn as geometric strokes, so it looks the same everywhere.
+
+    Each A has a coloured dot from the logo palette instead of a crossbar,
+    a small star in the name of the star maiden. Glyphs are drawn on a
+    34-unit cap height and scaled to `h`.
+    """
+    k = h / 34
+    glyphs = {
+        "A": (30, "M0 34 L15 0 L30 34"),
+        "S": (24, "M23.5 6 C21 2 17 0 12 0 C5.5 0 1 3.2 1 8.8 C1 14.5 5.5 16 12 17 "
+                  "C18.5 18 23.5 19.8 23.5 25.5 C23.5 31 19 34 12 34 C6.5 34 2.2 31.8 0 28"),
+        "T": (26, "M0 0 H26 M13 0 V34"),
+        "R": (25, "M0 34 V0 H14 C21 0 25 4 25 9.5 C25 15 21 19 14 19 H0 M13 19 L25 34"),
+        "E": (22, "M22 0 H0 V34 H22 M0 17 H18"),
+    }
+    stars = iter([DOTS["magenta"], DOTS["yellow"], DOTS["green"]])
+    out = [f'<g transform="translate({f(x)} {f(y)}) scale({f(k)})" fill="none" stroke="{INK}" '
+           f'stroke-width="{f(stroke / k)}" stroke-linejoin="miter" stroke-linecap="square">']
+    cx = 0.0
+    for ch in "ASTRAEA":
+        w, d = glyphs[ch]
+        out.append(f'<path transform="translate({f(cx)} 0)" d="{d}"/>')
+        if ch == "A":
+            out.append(f'<circle cx="{f(cx + 15)}" cy="23" r="{f(2.9 / k)}" fill="{next(stars)}" stroke="none"/>')
+        cx += w + track / k
+    out.append("</g>")
+    return "".join(out), (cx - track / k) * k
+
+
 # ---------------------------------------------------------------- hero
 
 def hero():
-    W, H = 1200, 460
-    cx, cy, R = 905, 500, 300
+    W, H = 1200, 480
+    cx, cy, R = 905, 525, 300
     pole_y = cy - R
     n = 18
     period = 36  # seconds for half a turn
@@ -114,11 +144,12 @@ def hero():
     stat_svg = []
     for i, (label, value) in enumerate(stats):
         x = 64 + i * 178
-        stat_svg.append(f'<text x="{x}" y="392" class="sans" font-size="13" fill="{MUTED}">{label}</text>'
-                        f'<text x="{x}" y="418" class="sans" font-size="20" fill="{INK}">{value}</text>')
+        stat_svg.append(f'<text x="{x}" y="414" class="sans" font-size="13" fill="{MUTED}">{label}</text>'
+                        f'<text x="{x}" y="440" class="sans" font-size="20" fill="{INK}">{value}</text>')
 
+    mark, _ = wordmark(64, 86)
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-labelledby="t d">
-  <title id="t">Astraea</title>
+  <title id="t">Astraea by Lending Network</title>
   <desc id="d">XRPL history you can check yourself. A dotted globe turns slowly while ledgers climb its meridians to the pole, where validators agree on them.</desc>
   <style>{STYLE_BASE}
     .wire {{ fill: none; stroke: url(#globe); stroke-width: .7; opacity: .3; }}
@@ -156,14 +187,13 @@ def hero():
   </g>
   <rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="15.5" fill="none" stroke="{CARD_EDGE}"/>
 
-  {logo_mark(84, 64)}
-  <text x="110" y="69" class="sans" font-size="13" font-weight="700" letter-spacing="1" fill="{INK}">XRP LEDGER</text>
-  <line x1="210" y1="57" x2="210" y2="72" stroke="{MUTED}"/>
-  <text x="222" y="69" class="sans" font-size="12" font-weight="500" letter-spacing="3.2" fill="{INK}">ASTRAEA</text>
+  {logo_mark(82, 52, 1.3)}
+  {mark}
+  <text x="64" y="144" class="sans" font-size="11" font-weight="500" letter-spacing="3.6" fill="{MUTED}">BY LENDING NETWORK</text>
 
-  <text x="62" y="186" class="serif" font-size="56" fill="{INK}" letter-spacing="-.5">XRPL history</text>
-  <text x="62" y="250" class="serif" font-size="56" fill="{INK}" letter-spacing="-.5">you can check yourself</text>
-  <text x="64" y="298" class="sans" font-size="16" fill="{MUTED}">A Clio-compatible history server with proofs backed by validator signatures.</text>
+  <text x="62" y="222" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">XRPL history</text>
+  <text x="62" y="282" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">you can check yourself</text>
+  <text x="64" y="326" class="sans" font-size="16" fill="{MUTED}">A Clio-compatible history server with proofs backed by validator signatures.</text>
   {''.join(stat_svg)}
 </svg>
 """
