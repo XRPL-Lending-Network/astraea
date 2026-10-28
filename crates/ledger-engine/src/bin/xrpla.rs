@@ -111,24 +111,51 @@ struct Http {
 }
 
 impl Http {
+    /// One object or byte range. Dropped connections, timeouts, 5xx answers
+    /// and short ranges are retried with a growing pause: the publication
+    /// server sometimes cuts long transfers, and one cut segment shouldn't
+    /// cost the whole chunk. Contents are checked by digest afterwards anyway.
     fn get(&self, path: &str, range: Option<(u64, u64)>) -> Res<Vec<u8>> {
+        const PAUSES: [u64; 5] = [5, 15, 30, 60, 120];
+        let mut attempt = 0;
+        loop {
+            match self.get_once(path, range) {
+                Ok(b) => return Ok(b),
+                Err((err, retry)) if retry && attempt < PAUSES.len() => {
+                    eprintln!("{err}; retrying in {} s", PAUSES[attempt]);
+                    std::thread::sleep(std::time::Duration::from_secs(PAUSES[attempt]));
+                    attempt += 1;
+                }
+                Err((err, _)) => return Err(err),
+            }
+        }
+    }
+
+    /// One attempt; the flag says whether the failure is worth retrying.
+    fn get_once(&self, path: &str, range: Option<(u64, u64)>) -> Result<Vec<u8>, (String, bool)> {
         let url = format!("{}/{path}", self.base);
         let mut req = self.agent.get(&url);
         if let Some((a, b)) = range {
             req = req.header("Range", &format!("bytes={a}-{}", b - 1));
         }
-        let mut resp = req.call().map_err(|x| format!("{url}: {x}"))?;
+        let mut resp = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::StatusCode(code)) => {
+                return Err((format!("{url}: HTTP {code}"), code >= 500));
+            }
+            Err(x) => return Err((format!("{url}: {x}"), true)),
+        };
         let status = resp.status().as_u16();
         let body = resp
             .body_mut()
             .with_config()
             .limit(1 << 30)
             .read_to_vec()
-            .map_err(e)?;
+            .map_err(|x| (format!("{url}: {x}"), true))?;
         if let Some((a, b)) = range
             && (status != 206 || body.len() as u64 != b - a)
         {
-            return Err(format!("{url}: range request not honored ({status})"));
+            return Err((format!("{url}: range request not honored ({status})"), true));
         }
         Ok(body)
     }
