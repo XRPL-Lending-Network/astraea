@@ -4,8 +4,9 @@
 # SHA256SUMS 283862fa4538e758678fde514cb09d85c2c4a3dee520012fab1632cdc292cbf8);
 # only the path to witness-core was changed (it matches pinned snapshot
 # 7838927). Added during integration: src/pool.rs (a pool of prepared blocks
-# for serving) and the `pub mod pool;` line in lib.rs. The format and the
-# existing modules are unchanged.
+# for serving), the `pub mod pool;` line in lib.rs, and two read methods in
+# src/fast.rs (`Prepared::header` and `Prepared::row_txs`) that decode part of
+# a row. The format and the rest of the modules are unchanged.
 # This is a research format: the production version and its compatibility
 # rules will be fixed separately.
 [package]

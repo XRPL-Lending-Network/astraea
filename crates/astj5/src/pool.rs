@@ -240,6 +240,39 @@ impl Pool {
             Data::Rows(rows) => rows.get(local).cloned().ok_or("ledger extent".into()),
         }
     }
+    /// Header of ledger `seq` only.
+    pub fn header(&self, seq: u32) -> Res<Vec<u8>> {
+        let i = self.block_of(seq)?;
+        let local = (seq - self.entries[i].first) as usize;
+        let d = self.block(i)?;
+        let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
+        match &mut *d {
+            Data::Prepared(f) => f.header(local),
+            Data::Rows(rows) => rows
+                .get(local)
+                .map(|r| r.header.clone())
+                .ok_or("ledger extent".into()),
+        }
+    }
+    /// Ledger `seq` with transactions but no patches (`patches` is empty).
+    pub fn ledger_txs(&self, seq: u32) -> Res<Row> {
+        let i = self.block_of(seq)?;
+        let local = (seq - self.entries[i].first) as usize;
+        let d = self.block(i)?;
+        let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
+        match &mut *d {
+            Data::Prepared(f) => f.row_txs(local),
+            Data::Rows(rows) => rows
+                .get(local)
+                .map(|r| Row {
+                    seq: r.seq,
+                    header: r.header.clone(),
+                    txs: r.txs.clone(),
+                    patches: Vec::new(),
+                })
+                .ok_or("ledger extent".into()),
+        }
+    }
     /// Transaction at original storage position `within` of ledger `seq`.
     pub fn tx(&self, seq: u32, within: usize) -> Res<(Vec<u8>, Vec<u8>)> {
         let i = self.block_of(seq)?;
@@ -307,6 +340,24 @@ mod tests {
         }
         assert!(pool.ledger(9).is_err() && pool.ledger(60).is_err());
         assert!(pool.slots.lock().unwrap().0.len() <= 4);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn header_and_transactions_read_without_patches() {
+        let rs = rows(10, 20);
+        let (archive, _) = pack_bounded(&rs, 8, MAX, Options::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("astj5-pool-tx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.astj");
+        std::fs::write(&path, &archive).unwrap();
+        let pool = Pool::open(&path, 1 << 20, 2).unwrap();
+        for r in &rs {
+            assert_eq!(pool.header(r.seq).unwrap(), r.header);
+            let t = pool.ledger_txs(r.seq).unwrap();
+            assert_eq!((t.seq, &t.header, &t.txs), (r.seq, &r.header, &r.txs));
+            assert!(t.patches.is_empty() && !r.patches.is_empty());
+        }
+        assert!(pool.header(30).is_err() && pool.ledger_txs(9).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

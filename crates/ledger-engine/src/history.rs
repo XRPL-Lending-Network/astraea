@@ -875,6 +875,12 @@ impl HistoryReader {
         Ok(l)
     }
 
+    /// Header of a ledger in cold history only, without decoding its
+    /// transactions; `None` if the ledger isn't in cold history.
+    pub fn cold_header(&self, seq: u32) -> Res<Option<Vec<u8>>> {
+        self.cold().header(seq)
+    }
+
     /// A ledger without state changes (header and transactions), for the API.
     pub fn get_txs(&self, seq: u32) -> Res<Option<Ledger>> {
         if self.cold_first

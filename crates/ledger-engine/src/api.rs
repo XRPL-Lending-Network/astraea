@@ -213,13 +213,19 @@ impl Engine {
     pub(crate) fn header(&self, seq: u32) -> Res<(Vec<u8>, LedgerHeader)> {
         let raw = match self.state.header(seq).map_err(internal)? {
             Some(r) => r,
-            // Before the snapshot: header from cold history.
+            // Before the snapshot: header from cold history, read alone; a
+            // ledger kept in hot history files falls back to its frame.
             None if seq < self.hot_first()? => {
-                self.blocks
-                    .get_txs(seq)
-                    .map_err(internal)?
-                    .ok_or_else(lgr_not_found)?
-                    .header
+                match self.blocks.cold_header(seq).map_err(internal)? {
+                    Some(h) => h,
+                    None => {
+                        self.blocks
+                            .get_txs(seq)
+                            .map_err(internal)?
+                            .ok_or_else(lgr_not_found)?
+                            .header
+                    }
+                }
             }
             None => return Err(lgr_not_found()),
         };
@@ -938,7 +944,8 @@ impl Engine {
             if let Some(c) = self.ctid(t.at.ledger, e.index) {
                 tj.insert("ctid".into(), json!(c));
             }
-            let (_, h) = self.header(t.at.ledger)?;
+            // The header comes with the ledger already read for this page.
+            let h = LedgerHeader::parse(&l.header).map_err(|e| internal(e.to_string()))?;
             tj.insert("date".into(), json!(h.close_time));
             tj.insert("ledger_index".into(), json!(t.at.ledger));
             if api < 2 {

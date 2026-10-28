@@ -597,6 +597,28 @@ impl Prepared {
             patches,
         })
     }
+    /// Header of ledger `index`, without touching its transactions or patches.
+    pub fn header(&mut self, index: usize) -> Res<Vec<u8>> {
+        let h = self.layout.get(index).ok_or("ledger index")?.header;
+        self.document(h)
+    }
+    /// Ledger `index` with its transactions but without patches (left empty):
+    /// readers that serve transactions don't pay for state changes.
+    pub fn row_txs(&mut self, index: usize) -> Res<Row> {
+        let l = self.layout.get(index).ok_or("ledger index")?;
+        let (seq, h, tx) = (l.seq, l.header, l.tx.clone());
+        let header = self.document(h)?;
+        let mut txs = Vec::with_capacity(tx.len());
+        for (t, m) in tx {
+            txs.push((self.document(t)?, self.document(m)?));
+        }
+        Ok(Row {
+            seq,
+            header,
+            txs,
+            patches: Vec::new(),
+        })
+    }
     pub fn all_rows(&mut self) -> Res<Vec<Row>> {
         (0..self.layout.len()).map(|i| self.row(i)).collect()
     }

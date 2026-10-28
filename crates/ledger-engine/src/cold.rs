@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 
 use astraea_journal_codec::{Options, Row, indexed, pack_bounded, pool::Pool, unpack};
 use serde_json::{Value, json};
+use witness_core::ledger::LedgerHeader;
 use witness_core::sha512_half;
 
 use crate::ledger::{Change, Ledger, StateChange};
@@ -64,11 +65,14 @@ impl Default for BlockLimit {
         }
     }
 }
-/// Maximum number of cold segments open at once.
-pub const COLD_OPEN: usize = 2;
+/// Maximum number of cold segments open at once. One account_tx page over
+/// full history touches many segments; with too few open they are closed
+/// and reopened on every request.
+pub const COLD_OPEN: usize = 16;
 /// Byte budget for prepared blocks in an open segment's cache (codec
-/// estimate), and the number of concurrent prepares per segment.
-pub const BLOCK_BUDGET: usize = 128 << 20;
+/// estimate), and the number of concurrent prepares per segment. Together
+/// with `COLD_OPEN` this caps the cold cache at about 1 GiB.
+pub const BLOCK_BUDGET: usize = 64 << 20;
 pub const PREPARES: usize = 2;
 /// Maximum change kinds in a segment: checked before allocating memory.
 const MAX_CHANGES: u64 = 1 << 32;
@@ -505,8 +509,24 @@ impl ColdSegment {
         Ok(())
     }
 
+    fn header(&self, o: &Open, seq: u32) -> Res<Vec<u8>> {
+        let raw = o.pool.header(seq).map_err(corrupt)?;
+        let got = LedgerHeader::parse(&raw).map_err(corrupt)?.sequence;
+        if got != seq {
+            return Err(corrupt(format!("at position {seq} found ledger {got}")));
+        }
+        Ok(raw)
+    }
+
     fn read(&self, o: &Open, seq: u32, with_changes: bool) -> Res<Ledger> {
-        let row = o.pool.ledger(seq).map_err(corrupt)?;
+        // Patches are decoded only when changes are asked for: they outweigh
+        // the transactions and API reads don't need them.
+        let row = if with_changes {
+            o.pool.ledger(seq)
+        } else {
+            o.pool.ledger_txs(seq)
+        }
+        .map_err(corrupt)?;
         if row.seq != seq {
             return Err(corrupt(format!(
                 "at position {seq} found ledger {}",
@@ -546,13 +566,25 @@ impl ColdSegment {
 }
 
 /// Cold segments of a directory, with a budget for open ones.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Cold {
     segments: Vec<Arc<ColdSegment>>,
     /// Open segments, most recent last. Shared by all generations from
     /// `open_with`: readers still holding an older generation spend
     /// the same budget and close the same segments.
     recent: Arc<Mutex<VecDeque<Arc<ColdSegment>>>>,
+    /// How many segments may be open at once (`COLD_OPEN`).
+    open_limit: usize,
+}
+
+impl Default for Cold {
+    fn default() -> Self {
+        Cold {
+            segments: Vec::new(),
+            recent: Arc::default(),
+            open_limit: COLD_OPEN,
+        }
+    }
 }
 
 impl Cold {
@@ -566,6 +598,7 @@ impl Cold {
         Ok(Cold {
             segments: ColdSegment::scan_with(dir, &prev.segments)?,
             recent: prev.recent.clone(),
+            open_limit: prev.open_limit,
         })
     }
 
@@ -603,13 +636,35 @@ impl Cold {
         (seq <= self.segments[i].last).then_some(i)
     }
 
-    /// A ledger from the cold history; `None` if it is not here.
+    /// Same segments with a different open limit (tests use a small one).
+    pub fn with_open_limit(mut self, n: usize) -> Cold {
+        self.open_limit = n.max(1);
+        self
+    }
+
+    /// A ledger from the cold history; `None` if it is not here. Without
+    /// changes only the header and transactions are decoded.
     pub fn ledger(&self, seq: u32, with_changes: bool) -> Res<Option<Ledger>> {
         let Some(i) = self.find(seq) else {
             return Ok(None);
         };
+        self.segments[i].check(seq, with_changes)?;
+        let (seg, o) = self.open_segment(i)?;
+        seg.read(&o, seq, with_changes).map(Some)
+    }
+
+    /// Header of a cold ledger alone; `None` if it is not here.
+    pub fn header(&self, seq: u32) -> Res<Option<Vec<u8>>> {
+        let Some(i) = self.find(seq) else {
+            return Ok(None);
+        };
+        self.segments[i].check(seq, false)?;
+        let (seg, o) = self.open_segment(i)?;
+        seg.header(&o, seq).map(Some)
+    }
+
+    fn open_segment(&self, i: usize) -> Res<(&Arc<ColdSegment>, Arc<Open>)> {
         let seg = &self.segments[i];
-        seg.check(seq, with_changes)?;
         // Open budget: a slot is freed and the segment is opened under the
         // shared lock, before reading, so there are never more than `COLD_OPEN` open.
         // The read itself happens outside the lock; reads already running on a closed
@@ -617,7 +672,7 @@ impl Cold {
         let o = {
             let mut r = self.recent.lock().unwrap_or_else(|p| p.into_inner());
             r.retain(|s| !Arc::ptr_eq(s, seg));
-            while r.len() >= COLD_OPEN {
+            while r.len() >= self.open_limit {
                 match r.pop_front() {
                     Some(s) => s.close(),
                     None => break,
@@ -627,7 +682,7 @@ impl Cold {
             r.push_back(seg.clone());
             o
         };
-        seg.read(&o, seq, with_changes).map(Some)
+        Ok((seg, o))
     }
 
     /// How many segments are open right now. Counted under the same lock that
@@ -642,7 +697,6 @@ impl Cold {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use witness_core::ledger::LedgerHeader;
 
     /// A chain of ledgers without transactions, with changes of all three kinds.
     pub(crate) fn chain(first: u32, n: u32) -> Vec<Ledger> {
@@ -751,11 +805,11 @@ pub(crate) mod tests {
         for f in [10u32, 20, 30] {
             write(dir.path(), &chain(f, 5), Kinds::Explicit).unwrap();
         }
-        let cold = Cold::open(dir.path()).unwrap();
+        let cold = Cold::open(dir.path()).unwrap().with_open_limit(2);
         for s in [10u32, 20, 30, 12] {
             cold.ledger(s, true).unwrap().unwrap();
         }
-        assert_eq!(cold.open_count(), COLD_OPEN);
+        assert_eq!(cold.open_count(), 2);
         // Concurrently: the number of open segments never exceeds the budget.
         let cold = Arc::new(cold);
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -774,7 +828,7 @@ pub(crate) mod tests {
         for h in hs {
             h.join().unwrap();
         }
-        assert!(seen.load(std::sync::atomic::Ordering::Relaxed) <= COLD_OPEN);
+        assert!(seen.load(std::sync::atomic::Ordering::Relaxed) <= 2);
         let p = dir.path().join("cold-0000000020.kinds");
         let mut b = fs::read(&p).unwrap();
         let n = b.len();
