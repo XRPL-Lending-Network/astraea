@@ -1,4 +1,4 @@
-# Evidence package: formats `xrpl-witness/evidence/1` and `/2`
+# Evidence package: formats `xrpl-witness/evidence/1` to `/4`
 
 An evidence package is a single JSON file about a single ledger. It lets
 anyone check that the ledger was confirmed by a quorum under *their own*
@@ -46,7 +46,40 @@ all zeros, or it holds a different leaf, included in full, with the same key
 prefix. Only one leaf can sit in that slot, so our key does not exist under
 that prefix.
 
-Version 3 packages are produced by Astraea (Proof API): `proof_ledger`,
+## Version 4
+
+`xrpl-witness/evidence/4` adds `skips`, hops back to ledgers older than the
+chain. Fields from earlier versions are unchanged.
+
+| Field | Contents |
+|---|---|
+| `skips[]` | in order, each with `list`: a `LedgerHashes` object proven present (`xrpl-witness/state-proof/1`) in the state of a ledger the package already proves, and `headers`: headers (hex) from an older ledger up to one whose hash is in that list |
+
+The network keeps two such lists in every ledger's state, updated before the
+transactions run. The short list, key SHA-512Half(`0x0073`), holds the
+hashes of the previous 256 ledgers. When the previous ledger's index is a
+multiple of 256, its hash is also appended to the long list of its group of
+65536 ledgers, key SHA-512Half(`0x0073`, index >> 16 as a 32-bit integer).
+Long lists are never removed, so the latest state holds the hash of every
+256th ledger since the start of history. Only the protocol writes these
+objects, and only with hashes of earlier ledgers of the same chain.
+
+Checking a hop: the list's state proof checks out against a ledger already
+linked (the confirmed one, one from `chain`, or one from an earlier hop); its
+key is the short list key, or the long list key for the last header's group
+when that header's index is a multiple of 256; the object is a
+`LedgerHashes` entry; the headers are consecutive and linked by parent
+hashes; and the hash of the last header is in the list's `Hashes`. The
+hop's headers are then linked too, and the first header of the last hop is
+the target. Transactions and objects can be proven against any linked
+header.
+
+Astraea builds a hop for a target older than 512 ledgers: the long list is
+proven in the state of the latest tree ledger, which is anchored by quorum
+as in version 3, and the headers run from the target up to the next multiple
+of 256, at most 256 of them.
+
+Version 3 and 4 packages are produced by Astraea (Proof API): `proof_ledger`,
 `proof_tx`, `proof_entry`. The response carries a `guarantee` next to the
 package, stating what is proven, how the target ledger was confirmed, and
 what the package does not prove. Before returning a package, Astraea runs

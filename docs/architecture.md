@@ -72,7 +72,7 @@ Confirming ledger `N` confirms every loaded ledger before it, because the loader
 ![What an evidence package proves](../assets/proof.svg)
 
 1. Validations that put an *anchor* ledger over quorum, with the UNL lists and manifests needed to check who was allowed to vote.
-2. The chain of headers from the target ledger to the anchor (at most 512).
+2. The chain of headers from the target ledger to the anchor (at most 512). An older target is reached through a skip list instead: the latest state holds the hash of every 256th ledger since the start of history, so the package proves that list in the state of a recent anchored ledger and adds at most 256 headers from the target up to the ledger in the list.
 3. For a transaction, the path of sibling hashes from its leaf to the transaction root. For a state object, the path in the state tree, which can also prove that an object does *not* exist.
 
 `witness-verify evidence` checks a package with no network access and no trust in Astraea. The format is specified in [evidence-format.md](evidence-format.md).

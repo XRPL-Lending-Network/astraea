@@ -11,16 +11,23 @@
 //! The confirmation module keeps recent ones in memory; every 256 ledgers the ingester
 //! saves them to storage. The chain is at most `MAX_CHAIN` headers long.
 //!
+//! An older target is reached through a skip list (`xrpl-witness/evidence/4`):
+//! the latest state holds the hash of every 256th ledger since the start of
+//! history. The bundle proves that list in the state of the latest tree
+//! ledger, which is itself anchored as above, and adds the headers from the
+//! target up to the next multiple of 256, at most 256 of them.
+//!
 //! The response states plainly what is proven and how: whether the target ledger
 //! was itself validated by a quorum or is linked by hashes to a validated one, and what
 //! the bundle does not prove, for example that an account's history is complete.
 
 use serde_json::{Map, Value, json};
 use witness_core::evidence::{
-    Bundle, FORMAT_V3, PolicySpec, Provenance, PublisherResponse, Trust, ValidationEvidence, verify,
+    Bundle, FORMAT_V3, FORMAT_V4, PolicySpec, Provenance, PublisherResponse, SkipHop, Trust,
+    ValidationEvidence, verify,
 };
-use witness_core::ledger::LedgerHeader;
 use witness_core::shamap::{prove, tx_id, tx_leaf_hash};
+use witness_core::skiplist;
 use witness_core::stateproof::StateProof;
 use witness_core::txproof::TxProof;
 
@@ -58,14 +65,41 @@ struct Anchor {
 
 impl Engine {
     fn hash_of(&self, seq: u32) -> Res<[u8; 32]> {
-        let raw = self
-            .state
-            .header(seq)
-            .map_err(internal)?
-            .ok_or_else(|| err("lgrNotFound", 21, "ledgerNotFound"))?;
-        Ok(LedgerHeader::parse(&raw)
-            .map_err(|e| internal(e.to_string()))?
-            .hash())
+        Ok(self.header(seq)?.1.hash())
+    }
+
+    /// Headers `from..=to` in hex, hot or cold.
+    fn headers_hex(&self, from: u32, to: u32) -> Res<Vec<String>> {
+        (from..=to)
+            .map(|seq| Ok(hex::encode_upper(self.header(seq)?.0)))
+            .collect()
+    }
+
+    /// The long skip list in the latest tree ledger that holds the hash of the
+    /// target's covering ledger, and the headers from the target to it. The
+    /// tree ledger is returned too: the bundle anchors it.
+    fn skip_hop(&self, target: u32) -> Res<(SkipHop, u32)> {
+        let last = skiplist::covering(target);
+        let key = skiplist::long_key(last);
+        let t = self.state.tree_path(&key).map_err(internal)?;
+        // The hash of `last` is written into the ledger after it.
+        if last >= t.ledger {
+            return Err(internal(format!(
+                "no skip list for ledger {target} in tree ledger {}",
+                t.ledger
+            )));
+        }
+        let crate::state::Leaf::Present(object) = &t.leaf else {
+            return Err(internal(format!("skip list for ledger {last} is missing")));
+        };
+        let list = StateProof::new(&t.header, &key, Some(object), None, &t.path);
+        Ok((
+            SkipHop {
+                list,
+                headers: self.headers_hex(target, last)?,
+            },
+            t.ledger,
+        ))
     }
 
     /// Nearest validated ledger with validations after `target`.
@@ -158,25 +192,28 @@ impl Engine {
         Ok(())
     }
 
-    /// Bundle: anchor ledger, chain from `target`, proofs.
+    /// Bundle: anchor ledger, chain from `target` (or from the tree ledger and
+    /// a skip hop to `target`), proofs.
     fn bundle(
         &self,
         target: u32,
         transactions: Vec<TxProof>,
         objects: Vec<StateProof>,
     ) -> Res<(Bundle, u32)> {
-        let a = self.anchor(target)?;
-        // The chain runs from the target to the anchor inclusive, even if it is a single
+        let confirmed = self.state.confirmed().map_err(internal)?.unwrap_or(0);
+        // Within reach of a chain the target is anchored directly; deeper,
+        // through the skip list of the tree ledger.
+        let (from, skips) = if target.saturating_add(MAX_CHAIN) < confirmed {
+            let (hop, tree) = self.skip_hop(target)?;
+            self.wait_confirmed(tree)?;
+            (tree, vec![hop])
+        } else {
+            (target, Vec::new())
+        };
+        let a = self.anchor(from)?;
+        // The chain runs from its first ledger to the anchor inclusive, even if it is a single
         // ledger: the header is always in the bundle and its hash is checked.
-        let mut chain = Vec::new();
-        for seq in target..=a.sequence {
-            let raw = self
-                .state
-                .header(seq)
-                .map_err(internal)?
-                .ok_or_else(|| internal(format!("no header for {seq}")))?;
-            chain.push(hex::encode_upper(raw));
-        }
+        let chain = self.headers_hex(from, a.sequence)?;
         let c = self
             .confirmer
             .as_ref()
@@ -193,7 +230,12 @@ impl Engine {
             })
             .collect();
         let bundle = Bundle {
-            format: FORMAT_V3.into(),
+            format: if skips.is_empty() {
+                FORMAT_V3
+            } else {
+                FORMAT_V4
+            }
+            .into(),
             ledger_index: a.sequence,
             ledger_hash: hex::encode_upper(a.hash),
             policy: PolicySpec {
@@ -216,6 +258,7 @@ impl Engine {
             transactions,
             chain,
             objects,
+            skips,
         };
         // The bundle is checked by the same offline verifier the recipient uses, and
         // returned only if it reproduces our decision in full.
@@ -257,7 +300,11 @@ impl Engine {
             json!({
                 "target_ledger": target,
                 "anchor_ledger": anchor,
-                "target_confirmed_by": if anchor == target { "quorum" } else { "hash-chain" },
+                "target_confirmed_by": match (bundle.skips.is_empty(), anchor == target) {
+                    (false, _) => "skip-list",
+                    (true, true) => "quorum",
+                    (true, false) => "hash-chain",
+                },
                 "anchor_confirmed_by": "quorum",
                 "quorum_rule": "full-unl; UNL lists valid at ledger time; every possible policy must agree",
                 "proves": proves,
@@ -300,11 +347,15 @@ impl Engine {
                     "transaction must be a transaction hash",
                 )
             })?;
-        let (seq, pos) = self
-            .state
-            .tx_location(&id)
-            .map_err(internal)?
-            .ok_or_else(|| err("txnNotFound", 29, "Transaction not found."))?;
+        let not_found = || err("txnNotFound", 29, "Transaction not found.");
+        let (seq, pos) = match self.state.tx_location(&id).map_err(internal)? {
+            Some(at) => at,
+            None => self.cold_tx(&id)?.ok_or_else(not_found)?,
+        };
+        let (min, max) = self.range()?;
+        if seq < min || seq > max {
+            return Err(not_found());
+        }
         let l = self.ledger_txs(seq)?;
         let leaves: Vec<([u8; 32], [u8; 32])> = l
             .transactions

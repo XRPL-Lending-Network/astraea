@@ -34,6 +34,7 @@ use crate::negative_unl::NegativeUnl;
 use crate::quorum::{
     Decision, Key, Observed, Policy, PublishedList, assess, decide, default_threshold,
 };
+use crate::skiplist;
 use crate::stateproof::StateProof;
 use crate::txproof::TxProof;
 use crate::unl::verify_list;
@@ -45,6 +46,8 @@ pub const FORMAT_V2: &str = "xrpl-witness/evidence/2";
 /// Bundle with a header chain up to the confirmed ledger and state object
 /// proofs.
 pub const FORMAT_V3: &str = "xrpl-witness/evidence/3";
+/// Bundle that reaches older ledgers through skip lists (`skips`).
+pub const FORMAT_V4: &str = "xrpl-witness/evidence/4";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bundle {
@@ -71,6 +74,23 @@ pub struct Bundle {
     /// State object proofs (version 3).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub objects: Vec<StateProof>,
+    /// Hops to older ledgers through skip lists, in order (version 4). Each
+    /// starts from a ledger the bundle already proves, and the last one ends
+    /// at the target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skips: Vec<SkipHop>,
+}
+
+/// A hop back through a skip list: the list proven in the state of a ledger
+/// the bundle already proves, and headers from an older ledger up to one whose
+/// hash is in the list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkipHop {
+    /// The `LedgerHashes` object, present, in `xrpl-witness/state-proof/1` format.
+    pub list: StateProof,
+    /// Headers (hex) in order, each referencing the hash of the previous one;
+    /// the hash of the last one is in the list.
+    pub headers: Vec<String>,
 }
 
 /// Result for one state object in the bundle.
@@ -394,11 +414,14 @@ pub struct Report {
     pub transactions: Vec<TxCheck>,
     /// The header chain checks out (or there is none).
     pub chain_ok: bool,
-    /// The bundle's target ledger: the first in the chain, otherwise the confirmed one.
+    /// The bundle's target ledger: the first header of the last skip hop, the
+    /// first in the chain, otherwise the confirmed one.
     pub target_ledger: Option<u32>,
     pub target_hash: Option<String>,
     /// Per state object in the bundle (version 3).
     pub objects: Vec<ObjectCheck>,
+    /// Skip hops that check out (version 4); with `chain_ok`, all of them did.
+    pub skip_hops: usize,
 }
 
 /// Quorum with the Negative UNL from the bundle. There is no inclusion proof,
@@ -435,9 +458,9 @@ pub const RULE_FULL_UNL: &str = "full-unl";
 /// Verifies a bundle against the verifier's policy.
 pub fn verify(bundle: &Bundle, trust: &Trust) -> Report {
     let mut problems = Vec::new();
-    if bundle.format != FORMAT && bundle.format != FORMAT_V2 && bundle.format != FORMAT_V3 {
+    if ![FORMAT, FORMAT_V2, FORMAT_V3, FORMAT_V4].contains(&bundle.format.as_str()) {
         problems.push(format!(
-            "format {}, expected {FORMAT}, {FORMAT_V2} or {FORMAT_V3}",
+            "format {}, expected {FORMAT}, {FORMAT_V2}, {FORMAT_V3} or {FORMAT_V4}",
             bundle.format
         ));
     }
@@ -660,6 +683,11 @@ pub fn verify(bundle: &Bundle, trust: &Trust) -> Report {
     // Header chain: from the target to the confirmed ledger, each one references
     // the hash of the previous one, and the last is the one confirmed by quorum.
     let (chain_ok, linked, target) = check_chain(bundle, confirmed_hash.as_deref(), &mut problems);
+    let (chain_ok, linked, target, skip_hops) = if chain_ok {
+        check_skips(bundle, linked, target, &mut problems)
+    } else {
+        (false, linked, target, 0)
+    };
     let in_linked = |hash: &str| {
         linked
             .iter()
@@ -742,12 +770,15 @@ pub fn verify(bundle: &Bundle, trust: &Trust) -> Report {
         target_ledger: target.as_ref().map(|t| t.0),
         target_hash: target.map(|t| t.1),
         objects,
+        skip_hops,
     }
 }
 
 /// Hashes of the ledgers the bundle proves (the confirmed one and those linked
 /// to it by the chain), and the target (the first header of the chain or the confirmed ledger itself).
 type Linked = (bool, Vec<(String, u32)>, Option<(u32, String)>);
+/// `Linked` and the number of skip hops that checked out.
+type LinkedSkips = (bool, Vec<(String, u32)>, Option<(u32, String)>, usize);
 
 fn check_chain(bundle: &Bundle, confirmed: Option<&str>, problems: &mut Vec<String>) -> Linked {
     let Some(confirmed) = confirmed else {
@@ -761,25 +792,9 @@ fn check_chain(bundle: &Bundle, confirmed: Option<&str>, problems: &mut Vec<Stri
             Some((bundle.ledger_index, confirmed.to_owned())),
         );
     }
-    let mut headers = Vec::with_capacity(bundle.chain.len());
-    for (i, h) in bundle.chain.iter().enumerate() {
-        match hex::decode(h)
-            .ok()
-            .and_then(|b| crate::ledger::LedgerHeader::parse(&b).ok())
-        {
-            Some(x) => headers.push(x),
-            None => {
-                problems.push(format!("chain: cannot parse header {i}"));
-                return (false, vec![anchor], None);
-            }
-        }
-    }
-    for w in headers.windows(2) {
-        if w[1].sequence != w[0].sequence + 1 || w[1].parent_hash != w[0].hash() {
-            problems.push(format!("chain breaks at ledger {}", w[1].sequence));
-            return (false, vec![anchor], None);
-        }
-    }
+    let Some(headers) = parse_headers(&bundle.chain, "chain", problems) else {
+        return (false, vec![anchor], None);
+    };
     let last = &headers[headers.len() - 1];
     if last.sequence != bundle.ledger_index
         || !hex::encode_upper(last.hash()).eq_ignore_ascii_case(confirmed)
@@ -797,6 +812,112 @@ fn check_chain(bundle: &Bundle, confirmed: Option<&str>, problems: &mut Vec<Stri
         linked,
         Some((first.sequence, hex::encode_upper(first.hash()))),
     )
+}
+
+fn parse_headers(
+    hex_headers: &[String],
+    what: &str,
+    problems: &mut Vec<String>,
+) -> Option<Vec<crate::ledger::LedgerHeader>> {
+    let mut headers = Vec::with_capacity(hex_headers.len());
+    for (i, h) in hex_headers.iter().enumerate() {
+        match hex::decode(h)
+            .ok()
+            .and_then(|b| crate::ledger::LedgerHeader::parse(&b).ok())
+        {
+            Some(x) => headers.push(x),
+            None => {
+                problems.push(format!("{what}: cannot parse header {i}"));
+                return None;
+            }
+        }
+    }
+    for w in headers.windows(2) {
+        if w[1].sequence != w[0].sequence + 1 || w[1].parent_hash != w[0].hash() {
+            problems.push(format!("{what} breaks at ledger {}", w[1].sequence));
+            return None;
+        }
+    }
+    Some(headers)
+}
+
+/// Skip hops, in order: each list must be proven present in a ledger already
+/// linked, its key must be a skip list key, and the last of its headers must
+/// have a hash from the list. The headers of a hop then join the linked
+/// ledgers, and the first header of the last hop is the target.
+fn check_skips(
+    bundle: &Bundle,
+    mut linked: Vec<(String, u32)>,
+    mut target: Option<(u32, String)>,
+    problems: &mut Vec<String>,
+) -> LinkedSkips {
+    for (i, hop) in bundle.skips.iter().enumerate() {
+        let what = format!("skip hop {i}");
+        let fail = |problems: &mut Vec<String>, m: String| {
+            problems.push(format!("{what}: {m}"));
+        };
+        let proven = match hop.list.verify() {
+            Ok(p) => p,
+            Err(e) => {
+                fail(problems, format!("list proof: {e}"));
+                return (false, linked, target, i);
+            }
+        };
+        let in_linked = linked
+            .iter()
+            .any(|(h, s)| *s == proven.ledger_index && h.eq_ignore_ascii_case(&proven.ledger_hash));
+        if !proven.present || !in_linked {
+            fail(
+                problems,
+                "the list is not proven present in a ledger the bundle proves".into(),
+            );
+            return (false, linked, target, i);
+        }
+        let Some(headers) = parse_headers(&hop.headers, &what, problems) else {
+            return (false, linked, target, i);
+        };
+        let Some(last) = headers.last() else {
+            fail(problems, "no headers".into());
+            return (false, linked, target, i);
+        };
+        let is_key = |k: [u8; 32]| proven.key.eq_ignore_ascii_case(&hex::encode(k));
+        let long = last.sequence.is_multiple_of(256) && is_key(skiplist::long_key(last.sequence));
+        if !long && !is_key(skiplist::short_key()) {
+            fail(
+                problems,
+                "the object is not the skip list for this ledger".into(),
+            );
+            return (false, linked, target, i);
+        }
+        let object = hop
+            .list
+            .object
+            .as_deref()
+            .and_then(|o| hex::decode(o).ok())
+            .unwrap_or_default();
+        match skiplist::hashes(&object) {
+            Ok(hs) if hs.contains(&last.hash()) => {}
+            Ok(_) => {
+                fail(
+                    problems,
+                    format!("ledger {} is not in the skip list", last.sequence),
+                );
+                return (false, linked, target, i);
+            }
+            Err(e) => {
+                fail(problems, e);
+                return (false, linked, target, i);
+            }
+        }
+        linked.extend(
+            headers
+                .iter()
+                .map(|h| (hex::encode_upper(h.hash()), h.sequence)),
+        );
+        let first = &headers[0];
+        target = Some((first.sequence, hex::encode_upper(first.hash())));
+    }
+    (true, linked, target, bundle.skips.len())
 }
 
 #[cfg(test)]
@@ -833,6 +954,7 @@ mod chain_tests {
             transactions: Vec::new(),
             chain,
             objects: Vec::new(),
+            skips: Vec::new(),
         }
     }
 
@@ -872,5 +994,72 @@ mod chain_tests {
             )
             .0
         );
+    }
+
+    #[test]
+    fn skip_hop_links_an_older_ledger() {
+        use crate::shamap::{prove, root, state_leaf_hash};
+        // Ledgers 1000..=1024 of an old chain; 1024 is a multiple of 256.
+        let mut old = vec![header(1000, [5; 32])];
+        for seq in 1001..=1024 {
+            let parent = LedgerHeader::parse(old.last().unwrap()).unwrap().hash();
+            old.push(header(seq, parent));
+        }
+        let m = LedgerHeader::parse(old.last().unwrap()).unwrap().hash();
+        // The long list holding the hash of 1024, in the state of a confirmed ledger.
+        let key = skiplist::long_key(1024);
+        let mut list = vec![0x11, 0x00, 0x68, 0x02, 0x13, 64];
+        list.extend([3u8; 32]);
+        list.extend(m);
+        let other = ([0xAB; 32], vec![1u8, 2, 3]);
+        let leaves = vec![
+            (key, state_leaf_hash(&list, &key)),
+            (other.0, state_leaf_hash(&other.1, &other.0)),
+        ];
+        let mut confirmed = header(90_000, [8; 32]);
+        confirmed[76..108].copy_from_slice(&root(&leaves));
+        let anchor = hex::encode_upper(LedgerHeader::parse(&confirmed).unwrap().hash());
+        let mut b = bundle(90_000, vec![hex::encode_upper(&confirmed)]);
+        let proof = StateProof::new(
+            &confirmed,
+            &key,
+            Some(&list),
+            None,
+            &prove(&leaves, &key).unwrap(),
+        );
+        b.skips = vec![SkipHop {
+            list: proof,
+            headers: old.iter().map(hex::encode_upper).collect(),
+        }];
+        let check = |b: &Bundle| {
+            let mut problems = Vec::new();
+            let (ok, linked, target) = check_chain(b, Some(&anchor), &mut problems);
+            let r = check_skips(b, linked, target, &mut problems);
+            (ok && r.0, r.2.map(|t| t.0), r.1.len(), problems)
+        };
+        let (ok, target, linked, problems) = check(&b);
+        assert!(ok, "{problems:?}");
+        assert_eq!((target, linked), (Some(1000), 26));
+
+        // The headers stop short of the ledger in the list.
+        let mut short = b.clone();
+        short.skips[0].headers.pop();
+        let (ok, _, _, problems) = check(&short);
+        assert!(
+            !ok && problems.iter().any(|p| p.contains("skip list")),
+            "{problems:?}"
+        );
+
+        // A hop from a ledger the bundle does not prove.
+        let mut stray = b.clone();
+        stray.chain = vec![hex::encode_upper(header(90_000, [9; 32]))];
+        let stray_anchor = hex::encode_upper(
+            LedgerHeader::parse(&hex::decode(&stray.chain[0]).unwrap())
+                .unwrap()
+                .hash(),
+        );
+        let mut problems = Vec::new();
+        let (_, linked, target) = check_chain(&stray, Some(&stray_anchor), &mut problems);
+        assert!(!check_skips(&stray, linked, target, &mut problems).0);
     }
 }

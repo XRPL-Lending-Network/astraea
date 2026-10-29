@@ -15,6 +15,7 @@
 //! - `negative_unl`: who the network has temporarily disabled;
 //! - `ledger`: the ledger header and its hash;
 //! - `shamap`: the transaction tree and inclusion proofs;
+//! - `skiplist`: the ledger hash lists in state that link old ledgers to new ones;
 //! - `txproof`: a transaction inclusion proof as a portable object;
 //! - `quorum`: whether a ledger is confirmed under a given trust policy;
 //! - `evidence`: an evidence bundle for one ledger, and checking it.
@@ -31,6 +32,7 @@ pub mod manifest;
 pub mod negative_unl;
 pub mod quorum;
 pub mod shamap;
+pub mod skiplist;
 pub mod stateproof;
 pub mod stobject;
 pub mod txproof;

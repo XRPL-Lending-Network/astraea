@@ -82,7 +82,7 @@ Nothing else is forwarded, whatever its parameters say. Transaction submission a
 
 The response holds the package under `proof`, the anchor ledger, and two plain lists: what the package proves and what it does not (for example, a transaction proof says nothing about server-derived fields like `delivered_amount`).
 
-Limits in 0.1: the target has to be within 512 ledgers of an anchor with archived validations; `proof_tx` covers transactions in the hot store; `proof_entry` works on the latest state only and answers `notImpl` for other ledgers.
+`proof_ledger` and `proof_tx` work for any ledger the server holds, back to ledger 32570. A target within 512 ledgers of an anchor is linked to it by a header chain (`target_confirmed_by` is `quorum` or `hash-chain`). An older one is reached through a skip list (`skip-list`, package format `xrpl-witness/evidence/4`): the latest state holds the hash of every 256th ledger since the start of history, so the package proves that list in the state of a recent ledger and adds at most 256 headers from the target up to the ledger in the list. `proof_entry` still works on the latest state only and answers `notImpl` for other ledgers.
 
 Check a package offline. By default the verifier trusts the same two UNL publishers as xrpld's default configuration; `--publisher <hex key>` replaces them, `--threshold` sets how many lists must include a validator, and `--trust <n9… key>` adds a directly trusted validator.
 

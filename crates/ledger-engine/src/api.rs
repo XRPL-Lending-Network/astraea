@@ -722,7 +722,7 @@ impl Engine {
 
     /// Transaction by hash in cold history: XTXH candidates are checked by
     /// recomputing the hash.
-    fn cold_tx(&self, id: &[u8; 32]) -> Res<Option<(u32, u32)>> {
+    pub(crate) fn cold_tx(&self, id: &[u8; 32]) -> Res<Option<(u32, u32)>> {
         for (seq, pos) in self
             .blocks
             .cold_index()

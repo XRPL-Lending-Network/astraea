@@ -15,8 +15,8 @@ Done or in progress now.
 
 ## 0.2: proofs for all of history
 
-- Prove an old ledger by walking the ledger's own skip lists (the `LedgerHashes` objects) from a confirmed anchor, so a proof no longer needs an anchor within 512 ledgers.
-- `proof_tx` for transactions in the cold store.
+- Done: prove an old ledger through the ledger's own skip lists (the `LedgerHashes` objects) from a confirmed anchor, so a proof no longer needs an anchor within 512 ledgers.
+- Done: `proof_tx` for transactions in the cold store.
 - `proof_entry` for state at historical ledgers.
 - A public endpoint with TLS, rate limits and edge caching of answers about closed ledgers, which never change.
 

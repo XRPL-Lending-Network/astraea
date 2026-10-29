@@ -38,7 +38,7 @@ Clio-compatible methods, answered from Astraea's own data:
 
 Methods that Clio forwards to a node (`fee`, `server_state`, `ledger_current`, `server_definitions`, and read-only queries against the open ledger) are forwarded the same way. Submitting transactions is not supported.
 
-Proof methods: `proof_ledger`, `proof_tx` and `proof_entry` return an evidence package. The package format is described in [docs/evidence-format.md](docs/evidence-format.md), and `witness-verify evidence` checks one offline. In 0.1 a package can be built for ledgers within 512 ledgers of an archived quorum, which means the period since the validation archive started; `proof_tx` covers the hot store and `proof_entry` the latest state. Reaching older history through the ledger's own skip lists is the next step (see the roadmap).
+Proof methods: `proof_ledger`, `proof_tx` and `proof_entry` return an evidence package. The package format is described in [docs/evidence-format.md](docs/evidence-format.md), and `witness-verify evidence` checks one offline. `proof_ledger` and `proof_tx` cover all of history: an old ledger is reached through the skip lists the network keeps in its own state, which hold the hash of every 256th ledger since the start. `proof_entry` covers the latest state; state at past ledgers is the next step (see the roadmap).
 
 See [docs/api.md](docs/api.md) for parameters, differences from Clio and error behaviour.
 

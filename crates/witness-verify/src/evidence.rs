@@ -362,6 +362,7 @@ pub fn export(args: &ExportArgs) -> Res<bool> {
         transactions,
         chain: Vec::new(),
         objects: Vec::new(),
+        skips: Vec::new(),
     };
     // The claimed hash is the one that reached quorum under this same policy.
     let report = verify(&bundle, &trust);
