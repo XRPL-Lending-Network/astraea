@@ -19,18 +19,21 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use futures_util::SinkExt;
 use serde_json::{Map, Value, json};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 use crate::api::{Engine, RpcError, api_version};
 use crate::forward::{Forwarder, forwarded, node_info};
+use crate::metrics::{self, lock};
 use crate::subs::{self, Hub};
 
 const MAX_INFLIGHT: usize = 32;
@@ -49,6 +52,32 @@ struct Shared {
     cache: Arc<ProofCache>,
     forwarder: Option<Arc<Forwarder>>,
     hub: Arc<Hub>,
+    metrics: metrics::Shared,
+}
+
+/// Counts a finished request. A method name a client made up would be a new
+/// series each time, so names the server didn't take are counted as `other`.
+fn record(s: &Shared, transport: &'static str, method: &str, status: &str, started: Instant) {
+    let known = !matches!(status, "unknownCmd" | "badSyntax")
+        && (1..=40).contains(&method.len())
+        && method.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
+    let method = if known { method } else { "other" };
+    lock(&s.metrics)
+        .api
+        .record(transport, method, status, started.elapsed().as_secs_f64());
+}
+
+/// `success`, or the error name the client sees.
+fn status_of(result: &Result<Reply, RpcError>) -> String {
+    match result {
+        Ok(Reply::Forwarded(m)) if m.get("status") == Some(&json!("error")) => m
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("error")
+            .to_owned(),
+        Ok(_) => "success".into(),
+        Err(e) => e.error.into(),
+    }
 }
 
 fn warnings() -> Value {
@@ -214,13 +243,14 @@ async fn http_rpc(State(s): State<Shared>, body: String) -> Response {
                 .into_response();
         }
     };
+    let started = Instant::now();
     let method = request
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
     let result = match params_of(request.get("params")) {
-        Ok(p) if !method.is_empty() => call(&s, method, p).await,
+        Ok(p) if !method.is_empty() => call(&s, method.clone(), p).await,
         Ok(_) => Err(RpcError {
             error: "unknownCmd",
             code: 32,
@@ -228,6 +258,7 @@ async fn http_rpc(State(s): State<Shared>, body: String) -> Response {
         }),
         Err(e) => Err(e),
     };
+    record(&s, "http", &method, &status_of(&result), started);
     let result = match result {
         Ok(Reply::Own(mut m)) => {
             m.insert("status".into(), json!("success"));
@@ -254,12 +285,24 @@ async fn ws_upgrade(State(s): State<Shared>, ws: WebSocketUpgrade) -> Response {
 
 async fn ws_session(s: Shared, mut socket: WebSocket) {
     let (id, mut rx) = s.hub.join();
+    {
+        let mut m = lock(&s.metrics);
+        m.api.ws_sessions += 1;
+        m.api.ws_sessions_total += 1;
+    }
     loop {
         tokio::select! {
             msg = socket.recv() => {
                 let text = match msg {
                     Some(Ok(Message::Text(t))) => t,
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(Message::Close(_))) => {
+                        // The reply to a close is queued, not sent, until the next
+                        // write. Without it the client sees an abnormal close (1006),
+                        // and xrpl.js then reconnects a client it had disconnected.
+                        let _ = socket.flush().await;
+                        break;
+                    }
+                    Some(Err(_)) | None => break,
                     Some(Ok(_)) => continue,
                 };
                 let reply = ws_answer(&s, id, &text).await;
@@ -277,6 +320,8 @@ async fn ws_session(s: Shared, mut socket: WebSocket) {
         }
     }
     s.hub.leave(id);
+    let mut m = lock(&s.metrics);
+    m.api.ws_sessions = m.api.ws_sessions.saturating_sub(1);
 }
 
 /// subscribe and unsubscribe for session `id`; with the ledger stream the response
@@ -316,7 +361,9 @@ async fn subscription(
 }
 
 async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
+    let started = Instant::now();
     let Ok(Value::Object(request)) = serde_json::from_str::<Value>(text) else {
+        record(s, "ws", "", "badSyntax", started);
         let e = bad_syntax();
         let mut m = error_fields(&e, &json!(text));
         m.insert("warnings".into(), warnings());
@@ -335,8 +382,9 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
     let result = if method == "subscribe" || method == "unsubscribe" {
         subscription(s, id, &method, &params).await
     } else {
-        call(s, method, params).await
+        call(s, method.clone(), params).await
     };
+    record(s, "ws", &method, &status_of(&result), started);
     let mut m = match result {
         Ok(r) => {
             let mut m = Map::new();
@@ -375,9 +423,8 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
     Value::Object(m)
 }
 
-/// Listens on `addr` for the life of the process. If the address can't be bound,
-/// retries: ingestion matters more than the API.
-pub async fn serve(addr: SocketAddr, engine: Arc<Engine>, forwarder: Option<Arc<Forwarder>>) {
+/// The API routes over one set of subscriptions, which starts publishing here.
+fn app(engine: Arc<Engine>, forwarder: Option<Arc<Forwarder>>, metrics: metrics::Shared) -> Router {
     let shared = Shared {
         engine,
         inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
@@ -385,21 +432,100 @@ pub async fn serve(addr: SocketAddr, engine: Arc<Engine>, forwarder: Option<Arc<
         cache: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         forwarder,
         hub: Arc::new(Hub::default()),
+        metrics,
     };
     tokio::spawn(subs::run(shared.engine.clone(), shared.hub.clone()));
-    let app = Router::new()
+    Router::new()
         .route("/", get(ws_upgrade).post(http_rpc))
-        .with_state(shared);
-    loop {
-        match tokio::net::TcpListener::bind(addr).await {
-            Ok(listener) => {
-                info!("API at http://{addr}/ and ws://{addr}/");
-                if let Err(e) = axum::serve(listener, app.clone()).await {
-                    warn!("API: {e}");
+        .with_state(shared)
+}
+
+/// Listens on every address in `addrs` for the life of the process, with one
+/// set of subscriptions behind them all. An address that can't be bound is
+/// retried on its own: ingestion matters more than the API, and an address
+/// still held by the server being replaced is taken over once it is freed.
+pub async fn serve(
+    addrs: Vec<SocketAddr>,
+    engine: Arc<Engine>,
+    forwarder: Option<Arc<Forwarder>>,
+    metrics: metrics::Shared,
+) {
+    let app = app(engine, forwarder, metrics);
+    for addr in addrs {
+        let app = app.clone();
+        tokio::spawn(async move {
+            loop {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => {
+                        info!("API at http://{addr}/ and ws://{addr}/");
+                        if let Err(e) = axum::serve(listener, app.clone()).await {
+                            warn!("API: {e}");
+                        }
+                    }
+                    Err(e) => warn!("API: cannot listen on {addr}: {e}; retrying in 10 s"),
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
-            Err(e) => warn!("API: cannot listen on {addr}: {e}; retrying in 10 s"),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as Client;
+    use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+
+    #[tokio::test]
+    async fn a_client_close_is_answered_and_requests_are_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine {
+            state: Arc::new(crate::state::StateStore::open(&dir.path().join("state")).unwrap()),
+            blocks: crate::history::HistoryReader::open(&dir.path().join("history")).unwrap(),
+            network_id: 0,
+            started: Instant::now(),
+            confirmer: None,
+            quorum: Default::default(),
+        };
+        let metrics = metrics::Shared::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let routes = app(Arc::new(engine), None, metrics.clone());
+        tokio::spawn(async move { axum::serve(listener, routes).await });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        ws.send(Client::Text(r#"{"command":"ping","id":1}"#.into()))
+            .await
+            .unwrap();
+        let Some(Ok(Client::Text(reply))) = ws.next().await else {
+            panic!("no reply to ping");
+        };
+        assert!(reply.contains(r#""status":"success""#), "{reply}");
+        // xrpl.js closes with 4000 and reconnects unless the same code comes back.
+        ws.send(Client::Close(Some(CloseFrame {
+            code: CloseCode::Library(4000),
+            reason: "".into(),
+        })))
+        .await
+        .unwrap();
+        match ws.next().await {
+            Some(Ok(Client::Close(Some(f)))) => assert_eq!(f.code, CloseCode::Library(4000)),
+            other => panic!("expected a close reply, got {other:?}"),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        for _ in 0..100 {
+            if lock(&metrics).api.ws_sessions == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let m = lock(&metrics);
+        assert_eq!((m.api.ws_sessions, m.api.ws_sessions_total), (0, 1));
+        assert_eq!(
+            m.api.requests.get(&("ws", "ping".into(), "success".into())),
+            Some(&1)
+        );
     }
 }

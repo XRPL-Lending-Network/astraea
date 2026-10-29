@@ -87,10 +87,10 @@ struct Args {
     /// Prometheus metrics address, e.g. <metrics-host>:9104. No metrics without it.
     #[arg(long, env = "ASTRAEA_METRICS_ADDR")]
     metrics_addr: Option<SocketAddr>,
-    /// Address of the Clio-compatible API (JSON-RPC and WebSocket), e.g.
-    /// 127.0.0.1:51300. No API without it.
-    #[arg(long, env = "ASTRAEA_API_ADDR")]
-    api_addr: Option<SocketAddr>,
+    /// Addresses of the Clio-compatible API (JSON-RPC and WebSocket),
+    /// comma-separated, e.g. 127.0.0.1:51300. No API without them.
+    #[arg(long, env = "ASTRAEA_API_ADDR", value_delimiter = ',')]
+    api_addr: Vec<SocketAddr>,
     /// Node JSON-RPC endpoints for methods Clio forwards to a node (fee,
     /// server_state, ledger_current, server_definitions), comma-separated,
     /// e.g. http://<node-host>:51234. Without them these methods return unknownCmd.
@@ -429,7 +429,7 @@ async fn run(args: Args) -> Result<(), String> {
     }
     lock(&metrics).confirmed_ledger = sink.state.confirmed()?.unwrap_or(0);
     lock(&metrics).evidence_ledger = sink.state.last_evidence()?.unwrap_or(0);
-    if let Some(addr) = args.api_addr {
+    if !args.api_addr.is_empty() {
         let engine = Engine {
             state: sink.state.clone(),
             blocks: HistoryReader::open(&args.data_dir.join("history"))?
@@ -457,7 +457,12 @@ async fn run(args: Args) -> Result<(), String> {
                 }
             }
         });
-        tokio::spawn(server::serve(addr, engine, forwarder));
+        tokio::spawn(server::serve(
+            args.api_addr.clone(),
+            engine,
+            forwarder,
+            metrics.clone(),
+        ));
     }
     if let Some(dir) = &args.import_log {
         let from = sink.next();

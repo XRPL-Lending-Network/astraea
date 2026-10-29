@@ -4,6 +4,7 @@
 //! keep-alive, the whole response at once. If the address is not up yet (the
 //! tunnel starts later), the metrics server keeps retrying while loading goes on.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -47,6 +48,85 @@ pub struct Metrics {
     pub manifests: u64,
     /// Last ledger with stored anchor evidence.
     pub evidence_ledger: u32,
+    pub api: Api,
+}
+
+/// Upper bounds of the API latency buckets, seconds.
+pub const LATENCY_BUCKETS: [f64; 9] = [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 2.5];
+
+/// Requests to the Clio-compatible API. Methods and statuses come from a
+/// bounded set (the server folds unknown ones into `other`), so the series
+/// stay few.
+#[derive(Debug, Default)]
+pub struct Api {
+    /// Requests by (transport, method, status), status being `success` or the
+    /// error name.
+    pub requests: BTreeMap<(&'static str, String, String), u64>,
+    /// Latency by method: requests per bucket (not cumulative), count, sum.
+    pub latency: BTreeMap<String, ([u64; LATENCY_BUCKETS.len()], u64, f64)>,
+    /// Open WebSocket sessions.
+    pub ws_sessions: u64,
+    pub ws_sessions_total: u64,
+}
+
+impl Api {
+    pub fn record(&mut self, transport: &'static str, method: &str, status: &str, seconds: f64) {
+        *self
+            .requests
+            .entry((transport, method.to_owned(), status.to_owned()))
+            .or_default() += 1;
+        let (buckets, count, sum) = self.latency.entry(method.to_owned()).or_default();
+        if let Some(i) = LATENCY_BUCKETS.iter().position(|&b| seconds <= b) {
+            buckets[i] += 1;
+        }
+        *count += 1;
+        *sum += seconds;
+    }
+
+    fn render(&self, out: &mut String) {
+        let _ = writeln!(
+            out,
+            "# HELP astraea_api_requests_total API requests by transport, method and status.\n\
+             # TYPE astraea_api_requests_total counter"
+        );
+        for ((transport, method, status), n) in &self.requests {
+            let _ = writeln!(
+                out,
+                "astraea_api_requests_total{{transport=\"{transport}\",method=\"{method}\",status=\"{status}\"}} {n}"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP astraea_api_request_duration_seconds Time to answer an API request.\n\
+             # TYPE astraea_api_request_duration_seconds histogram"
+        );
+        for (method, (buckets, count, sum)) in &self.latency {
+            let mut below = 0;
+            for (b, n) in LATENCY_BUCKETS.iter().zip(buckets) {
+                below += n;
+                let _ = writeln!(
+                    out,
+                    "astraea_api_request_duration_seconds_bucket{{method=\"{method}\",le=\"{b}\"}} {below}"
+                );
+            }
+            let _ = writeln!(
+                out,
+                "astraea_api_request_duration_seconds_bucket{{method=\"{method}\",le=\"+Inf\"}} {count}\n\
+                 astraea_api_request_duration_seconds_sum{{method=\"{method}\"}} {sum:.6}\n\
+                 astraea_api_request_duration_seconds_count{{method=\"{method}\"}} {count}"
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP astraea_api_ws_sessions Open WebSocket sessions.\n\
+             # TYPE astraea_api_ws_sessions gauge\n\
+             astraea_api_ws_sessions {}\n\
+             # HELP astraea_api_ws_sessions_total WebSocket sessions opened since start.\n\
+             # TYPE astraea_api_ws_sessions_total counter\n\
+             astraea_api_ws_sessions_total {}",
+            self.ws_sessions, self.ws_sessions_total
+        );
+    }
 }
 
 pub type Shared = Arc<Mutex<Metrics>>;
@@ -196,6 +276,7 @@ impl Metrics {
             "Size of the state store on disk.",
             self.state_bytes.to_string(),
         );
+        self.api.render(&mut out);
         out
     }
 }
@@ -274,6 +355,32 @@ mod tests {
         assert!(text.contains("\nastraea_ingest_last_ledger 107875645\n"));
         assert!(text.contains("\nastraea_ingest_last_ledger_close_timestamp_seconds 946685800\n"));
         assert!(text.contains("\nastraea_ingest_last_commit_timestamp_seconds 1.500\n"));
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let (_, v) = line.rsplit_once(' ').unwrap();
+            assert!(v.parse::<f64>().is_ok(), "{line}");
+        }
+    }
+
+    #[test]
+    fn api_requests_render_as_a_histogram() {
+        let mut m = Metrics::default();
+        m.api.record("ws", "account_tx", "success", 0.003);
+        m.api.record("http", "account_tx", "actNotFound", 0.2);
+        m.api.record("ws", "account_tx", "success", 9.0);
+        m.api.ws_sessions = 2;
+        let text = m.render();
+        for line in [
+            "astraea_api_requests_total{transport=\"ws\",method=\"account_tx\",status=\"success\"} 2",
+            "astraea_api_requests_total{transport=\"http\",method=\"account_tx\",status=\"actNotFound\"} 1",
+            "astraea_api_request_duration_seconds_bucket{method=\"account_tx\",le=\"0.0025\"} 0",
+            "astraea_api_request_duration_seconds_bucket{method=\"account_tx\",le=\"0.005\"} 1",
+            "astraea_api_request_duration_seconds_bucket{method=\"account_tx\",le=\"2.5\"} 2",
+            "astraea_api_request_duration_seconds_bucket{method=\"account_tx\",le=\"+Inf\"} 3",
+            "astraea_api_request_duration_seconds_count{method=\"account_tx\"} 3",
+            "astraea_api_ws_sessions 2",
+        ] {
+            assert!(text.contains(&format!("\n{line}\n")), "{line}");
+        }
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let (_, v) = line.rsplit_once(' ').unwrap();
             assert!(v.parse::<f64>().is_ok(), "{line}");

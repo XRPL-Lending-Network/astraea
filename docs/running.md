@@ -54,7 +54,7 @@ astraea-ingest \
 | `--validations-ws` | one or more WebSocket endpoints for the validations stream, comma separated |
 | `--unl-dir` | the `witness-unl` archive |
 | `--publishers` | UNL publisher keys to trust, hex; defaults to vl.ripple.com and unl.xrplf.org |
-| `--api-addr` | where to serve JSON-RPC and WebSocket; no API without it |
+| `--api-addr` | where to serve JSON-RPC and WebSocket, one or more addresses, comma separated; no API without it. An address that is busy is retried every 10 s, so Astraea takes over a port as soon as the server holding it stops |
 | `--forward-rpc` | node JSON-RPC endpoints for forwarded methods; without them those methods return `unknownCmd` |
 | `--forward-timeout` | per-node timeout for forwarding, seconds (default 5) |
 | `--network-id` | network ID for CTIDs, 0 for mainnet |
