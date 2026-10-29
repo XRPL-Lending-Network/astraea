@@ -447,6 +447,10 @@ impl StateStore {
     /// records are written below the existing ones, and `levels_from` moves
     /// down to the snapshot only once all of them are in. Returns the range
     /// rebuilt, `None` if there was nothing to do.
+    ///
+    /// The scratch tree survives a stop: each ledger's nodes go into one batch
+    /// with its records and the number of the ledger, and a later call goes on
+    /// from there once the scratch root matches that ledger's `AccountHash`.
     pub fn backfill_levels(
         &self,
         scratch: &std::path::Path,
@@ -470,31 +474,78 @@ impl StateStore {
             .header()?
             .account_hash)
         };
-        let _ = std::fs::remove_dir_all(scratch);
         // The replay walks the whole tree; with the default cache it rereads
         // the same blocks from the page cache for every ledger.
-        let db = Database::builder(scratch)
-            .cache_size(1 << 30)
-            .open()
-            .map_err(err)?;
-        let ks = |name: &str| {
-            db.keyspace(name, KeyspaceCreateOptions::default)
-                .map_err(err)
+        let open = || -> Result<_, String> {
+            let db = Database::builder(scratch)
+                .cache_size(1 << 30)
+                .open()
+                .map_err(err)?;
+            let ks = |name: &str| {
+                db.keyspace(name, KeyspaceCreateOptions::default)
+                    .map_err(err)
+            };
+            let t = StateTree {
+                live: ks("live")?,
+                tree: ks("tree")?,
+            };
+            let (meta, pending) = (ks("meta")?, ks("records")?);
+            Ok((db, t, meta, pending))
         };
-        let t = StateTree {
-            live: ks("live")?,
-            tree: ks("tree")?,
+        // The scratch tree is for this snapshot and this end, at ledger `done`.
+        let mut job = [0u8; 8];
+        job[..4].copy_from_slice(&base.to_be_bytes());
+        job[4..].copy_from_slice(&to.to_be_bytes());
+        let mut resumed = None;
+        if scratch.exists() {
+            let (db, t, meta, pending) = open()?;
+            let done = meta
+                .get(b"done")
+                .map_err(err)?
+                .and_then(|v| <[u8; 4]>::try_from(&v[..]).ok())
+                .map(u32::from_be_bytes);
+            let same = meta.get(b"job").map_err(err)?.is_some_and(|v| v[..] == job);
+            if let Some(d) = done
+                && same
+                && d >= base
+                && d < to
+                && t.root()? == account_hash(d)?
+            {
+                resumed = Some((db, t, meta, pending, d));
+            }
+        }
+        let (db, t, meta, pending, mut next) = match resumed {
+            Some((db, t, meta, pending, d)) => (db, t, meta, pending, d + 1),
+            None => {
+                let _ = std::fs::remove_dir_all(scratch);
+                let (db, t, meta, pending) = open()?;
+                (db, t, meta, pending, base)
+            }
         };
         let snap = self.db.snapshot();
-        let mut records: Vec<(u32, Vec<u8>)> = Vec::new();
-        let flush = |records: &mut Vec<(u32, Vec<u8>)>| -> Result<(), String> {
+        // Records wait in the scratch store, in the batch of their ledger, and
+        // move to the tree history in groups; a stop between the two steps
+        // only moves some of them twice.
+        let flush = || -> Result<(), String> {
+            let mut moved = Vec::new();
             let mut b = self.db.batch();
-            for (seq, v) in records.drain(..) {
-                b.insert(&self.levels, seq.to_be_bytes(), v);
+            for g in pending.iter() {
+                let (k, v) = g.into_inner().map_err(err)?;
+                b.insert(&self.levels, k.clone(), v);
+                moved.push(k);
+            }
+            if moved.is_empty() {
+                return Ok(());
+            }
+            b.commit().map_err(err)?;
+            self.persist()?;
+            let mut b = db.batch();
+            for k in moved {
+                b.remove(&pending, k);
             }
             b.commit().map_err(err)
         };
-        let mut next = base;
+        flush()?;
         while next < to {
             // Replays ledgers [next, end): the first window starts with the snapshot.
             let end = next.saturating_add(window).min(to);
@@ -550,7 +601,11 @@ impl StateStore {
                 if level.len() != LEVEL_SLOTS {
                     return Err("the snapshot's tree is too sparse for tree history".into());
                 }
-                records.push((base, encode_levels(&level)));
+                let mut b = db.batch();
+                b.insert(&pending, base.to_be_bytes(), encode_levels(&level));
+                b.insert(&meta, "job", job);
+                b.insert(&meta, "done", base.to_be_bytes());
+                b.commit().map_err(err)?;
                 next = base + 1;
             }
             changes.sort_by_key(|c| c.0);
@@ -569,18 +624,19 @@ impl StateStore {
                         "replay does not give the state root of ledger {seq}"
                     ));
                 }
-                b.commit().map_err(err)?;
                 if !level.is_empty() {
-                    records.push((seq, encode_levels(&level)));
+                    b.insert(&pending, seq.to_be_bytes(), encode_levels(&level));
                 }
-                if records.len() >= 1024 {
-                    flush(&mut records)?;
+                b.insert(&meta, "done", seq.to_be_bytes());
+                b.commit().map_err(err)?;
+                if seq.is_multiple_of(1024) {
+                    flush()?;
                 }
                 if seq.is_multiple_of(4096) {
                     progress(seq, to);
                 }
             }
-            flush(&mut records)?;
+            flush()?;
             progress(end, to);
             next = end;
         }
@@ -588,8 +644,7 @@ impl StateStore {
         b.insert(&self.meta, LEVELS_FROM, base.to_be_bytes());
         b.commit().map_err(err)?;
         self.persist()?;
-        drop(t);
-        drop(db);
+        drop((t, meta, pending, db));
         let _ = std::fs::remove_dir_all(scratch);
         Ok(Some((base, to - 1)))
     }
@@ -1760,10 +1815,20 @@ mod tests {
         b.commit().unwrap();
         assert!(s.state_path_at(&key(1), 100).is_err());
         let scratch = dir.path().join("scratch");
+        // Stopped after the second window, it goes on from there.
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            s.backfill_levels(&scratch, 50, |done, _| assert_ne!(done, 101))
+        }));
+        assert!(stopped.is_err());
+        assert!(scratch.exists());
+        assert_eq!(s.levels_from().unwrap(), Some(256));
+        let seen = std::cell::RefCell::new(Vec::new());
         assert_eq!(
-            s.backfill_levels(&scratch, 50, |_, _| {}).unwrap(),
+            s.backfill_levels(&scratch, 50, |done, _| seen.borrow_mut().push(done))
+                .unwrap(),
             Some((1, 255))
         );
+        assert_eq!(seen.into_inner(), [151, 201, 251, 256]);
         assert_eq!(s.levels_from().unwrap(), Some(1));
         assert!(!scratch.exists());
         let rebuilt = records(&s);
