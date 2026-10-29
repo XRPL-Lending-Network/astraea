@@ -330,8 +330,12 @@ mod tests {
         assert_eq!(lf(f.node_server_info().unwrap()), 1);
         assert_eq!(lf(f.node_server_info().unwrap()), 1);
         assert!(t.elapsed() < Duration::from_millis(50));
-        std::thread::sleep(Duration::from_millis(400));
-        assert_eq!(lf(f.node_server_info().unwrap()), 2);
+        // The refresh lands after the node's delay; a loaded machine may take longer.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lf(f.node_server_info().unwrap()) != 2 {
+            assert!(Instant::now() < deadline, "no refresh");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

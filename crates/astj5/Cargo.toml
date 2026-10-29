@@ -4,10 +4,12 @@
 # SHA256SUMS 283862fa4538e758678fde514cb09d85c2c4a3dee520012fab1632cdc292cbf8);
 # only the path to witness-core was changed (it matches pinned snapshot
 # 7838927). Added during integration: src/pool.rs (a pool of prepared blocks
-# for serving), the `pub mod pool;` line in lib.rs, and two read methods in
-# src/fast.rs (`Prepared::header` and `Prepared::row_txs`) that decode part of
-# a row, and a faster hasher for the field cache in `Prepared::parse_mode`. The
-# format and the rest of the modules are unchanged.
+# for serving), the `pub mod pool;` line in lib.rs, read methods in src/fast.rs
+# that decode part of a row, a faster hasher for the field cache, and the
+# JC06 / ASTJ6 format: blocks cut into parts that decode on their own
+# (`Options::part_raw`, payload mode 2, `Prepared::open_parts`), with seal
+# digests per part. JC02-JC05 blocks are written and read as before; the other
+# modules are unchanged.
 # This is a research format: the production version and its compatibility
 # rules will be fixed separately.
 [package]

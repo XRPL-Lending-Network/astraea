@@ -6,6 +6,7 @@
 - Cold segments carry a seal (`cold-F.seal`): each block gets its full check once, when the segment is written, instead of on every load. `astraea-state history-cold-seal` seals older segments. With it, account_tx p99 is 383 ms and 16 clients get 234 requests per second, up from 39.
 - `server_info` no longer waits for the node: the node's `load_factor` and version are refreshed in the background.
 - One byte budget for the whole cold block cache instead of a fixed share per segment, and `TransactionIndex` read straight from the metadata header. On a real client's traffic `account_tx` p99 went from 16.7 ms to 5.3 ms (Clio: 7.2 to 8.8 ms).
+- Cold segments are written as ASTJ6: ASTJ5 blocks cut into parts of up to 1 MiB that decode on their own, each with its own dictionary and zstd frame. `account_tx` decodes one part per transaction instead of the whole block: a single cold transaction takes 2.0 ms instead of 7.0 on recent history. Archives grow by 8% on recent history and 17% around ledger 98 million. Seals cover a block's head and each part, so a read hashes only what it decodes. `astraea-state history-cold-recode` rewrites ASTJ5 segments in place while the server runs; with parts off, blocks are written byte for byte as before.
 - The XRPLA client retries dropped connections and 5xx answers with a growing pause.
 - The full-history loader locks each chunk, gives each process its own temporary archive, and refuses a chunk with fewer ledgers than asked.
 

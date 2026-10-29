@@ -127,6 +127,21 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         threads: usize,
     },
+    /// Write cold segments again as JC06 (blocks cut into parts read on their
+    /// own), in place and with the server running. Segments already in parts
+    /// are skipped.
+    HistoryColdRecode {
+        dir: PathBuf,
+        #[arg(long)]
+        first: Option<u32>,
+        #[arg(long)]
+        last: Option<u32>,
+        /// Segments recoded at once, one thread each.
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
+        #[arg(long, default_value_t = ledger_engine::cold::PART_RAW)]
+        part: usize,
+    },
     /// Check cold history indexes against the fjall indexes (`--db`) on the shared
     /// range: account history pages in both directions with marker, and transaction
     /// lookup by hash on a sample.
@@ -639,6 +654,7 @@ fn main() -> Result<(), String> {
                 let limit = cold::BlockLimit {
                     ledgers: block_ledgers,
                     raw: block_mib << 20,
+                    ..Default::default()
                 };
                 let m = cold::write_with(&to, &chunk, mode, limit)?;
                 let written = t0.elapsed().as_secs_f64();
@@ -744,6 +760,83 @@ fn main() -> Result<(), String> {
             println!(
                 "sealed {sealed} cold segments, {skipped} already sealed, in {:.0} s",
                 t.elapsed().as_secs_f64()
+            );
+        }
+        Command::HistoryColdRecode {
+            dir,
+            first,
+            last,
+            threads,
+            part,
+        } => {
+            let cold = ledger_engine::cold::Cold::open(&dir)?.with_open_limit(threads.max(1) * 2);
+            let todo: Vec<_> = cold
+                .segments()
+                .iter()
+                .filter(|s| {
+                    !s.in_parts()
+                        && first.is_none_or(|f| s.last >= f)
+                        && last.is_none_or(|l| s.first <= l)
+                })
+                .cloned()
+                .collect();
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let done = std::sync::atomic::AtomicUsize::new(0);
+            let (before, after) = (
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicU64::new(0),
+            );
+            let results: Vec<Result<(), String>> = std::thread::scope(|sc| {
+                let workers: Vec<_> = (0..threads.clamp(1, todo.len().max(1)))
+                    .map(|_| {
+                        sc.spawn(|| -> Result<(), String> {
+                            use std::sync::atomic::Ordering::Relaxed;
+                            loop {
+                                let Some(seg) = todo.get(next.fetch_add(1, Relaxed)) else {
+                                    return Ok(());
+                                };
+                                let old =
+                                    seg.manifest["files"]["astj"]["bytes"].as_u64().unwrap_or(0);
+                                let m = seg
+                                    .recode(part)
+                                    .map_err(|e| format!("segment {}: {e}", seg.first))?;
+                                before.fetch_add(old, Relaxed);
+                                after.fetch_add(
+                                    m["files"]["astj"]["bytes"].as_u64().unwrap_or(0),
+                                    Relaxed,
+                                );
+                                let n = done.fetch_add(1, Relaxed) + 1;
+                                eprintln!(
+                                    "recoded segment {} ({n} of {}), {:.0} s",
+                                    seg.first,
+                                    todo.len(),
+                                    t.elapsed().as_secs_f64()
+                                );
+                            }
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .map(|w| {
+                        w.join()
+                            .unwrap_or_else(|_| Err("recode worker panicked".into()))
+                    })
+                    .collect()
+            });
+            for r in results {
+                r?;
+            }
+            let (b, a) = (
+                before.load(std::sync::atomic::Ordering::Relaxed),
+                after.load(std::sync::atomic::Ordering::Relaxed),
+            );
+            println!(
+                "recoded {} cold segments in {:.0} s: archives {:.1} GB -> {:.1} GB",
+                done.load(std::sync::atomic::Ordering::Relaxed),
+                t.elapsed().as_secs_f64(),
+                b as f64 / 1e9,
+                a as f64 / 1e9
             );
         }
         Command::ColdIndexCheck { dir, samples } => {

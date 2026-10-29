@@ -40,6 +40,10 @@ name = "astraea-coldbench"
 path = "src/bin/coldbench.rs"
 
 [[bin]]
+name = "astraea-partbench"
+path = "src/bin/partbench.rs"
+
+[[bin]]
 name = "astraea-codecbench"
 path = "src/bin/codecbench.rs"
 

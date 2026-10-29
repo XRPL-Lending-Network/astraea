@@ -21,6 +21,16 @@ pub struct Row {
     pub txs: Vec<(Vec<u8>, Vec<u8>)>,
     pub patches: Vec<([u8; 32], Vec<u8>)>,
 }
+/// Digest of checked block bytes in a seal (`pool`): the directory hash and
+/// the stored bytes.
+pub(crate) fn seal_digest(hash: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha512};
+    let mut h = Sha512::new();
+    h.update(b"XWCS");
+    h.update(hash);
+    h.update(bytes);
+    h.finalize()[..32].try_into().unwrap()
+}
 fn er<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
@@ -227,8 +237,32 @@ struct Build {
     literal_objects: usize,
     context_delta: bool,
     deltas: HashMap<u32, Vec<Option<(u8, u64)>>>,
+    /// JC06: the current part, and the first and last part each value of 8
+    /// bytes or more appears in.
+    part: usize,
+    value_parts: HashMap<Vec<u8>, (usize, usize)>,
+}
+/// One part's streams: shapes with contexts, and columns.
+#[derive(Default)]
+struct Part {
+    shapes: Vec<usize>,
+    contexts: Vec<usize>,
+    columns: HashMap<u32, Vec<Option<Vec<u8>>>>,
+    deltas: HashMap<u32, Vec<Option<(u8, u64)>>>,
 }
 impl Build {
+    /// Ends the current part: its streams move out, and repeats and context
+    /// deltas no longer refer to values before it.
+    fn take_part(&mut self) -> Part {
+        self.last_values.clear();
+        self.part += 1;
+        Part {
+            shapes: std::mem::take(&mut self.shapes),
+            contexts: std::mem::take(&mut self.contexts),
+            columns: std::mem::take(&mut self.columns),
+            deltas: std::mem::take(&mut self.deltas),
+        }
+    }
     fn slot(&mut self, spec: &mut Vec<Spec>, col: u32, value: &[u8], tx: bool, ctx: usize) {
         if self.cached_slots
             && self.contextual
@@ -282,6 +316,13 @@ impl Build {
         }
         if tx && value.len() == 32 {
             self.tx_values.insert(value.to_vec());
+        }
+        if value.len() >= 8 {
+            let part = self.part;
+            self.value_parts
+                .entry(value.to_vec())
+                .and_modify(|p| p.1 = part)
+                .or_insert((part, part));
         }
     }
     fn shape(&mut self, index: usize, spec: Vec<Spec>) {
@@ -432,6 +473,136 @@ fn value_get(r: &mut Read) -> Res<Vec<u8>> {
         return Err("value size".into());
     }
     Ok(r.take(n)?.to_vec())
+}
+/// Shapes, contexts and columns of one part; returns delta columns and column bytes.
+fn part_streams(
+    out: &mut Vec<u8>,
+    part: &Part,
+    ids: &HashMap<Vec<u8>, usize>,
+    opt: Options,
+    v3: bool,
+) -> Res<(usize, usize)> {
+    put(out, part.shapes.len() as u64);
+    if v3 {
+        let mut shapes = vec![];
+        let mut contexts = vec![];
+        let mut prev = 0u64;
+        for (&id, &ctx) in part.shapes.iter().zip(&part.contexts) {
+            put(&mut shapes, id as u64);
+            let d = (ctx as u64).wrapping_sub(prev) as i64;
+            put(&mut contexts, ((d as u64) << 1) ^ ((d >> 63) as u64));
+            prev = ctx as u64;
+        }
+        blob(out, &shapes);
+        blob(out, &contexts);
+    } else {
+        for (&id, &ctx) in part.shapes.iter().zip(&part.contexts) {
+            put(out, id as u64);
+            put(out, ctx as u64);
+        }
+    }
+    let mut columns: Vec<_> = part.columns.iter().collect();
+    columns.sort_by_key(|x| *x.0);
+    let column_start = out.len();
+    put(out, columns.len() as u64);
+    let mut ndelta = 0;
+    for (&key, vs) in columns {
+        put(out, u64::from(key));
+        put(out, vs.len() as u64);
+        let joint_encoded = if opt.joint {
+            Some(joint::encode(
+                vs,
+                &part.deltas[&key],
+                ids,
+                opt.compact_signatures,
+            )?)
+        } else {
+            None
+        };
+        if opt.joint && !opt.adaptive {
+            out.push(2);
+            blob(out, joint_encoded.as_ref().unwrap());
+            continue;
+        }
+        let mut tokens = vec![];
+        for (at, v) in vs.iter().enumerate() {
+            if let Some(v) = v {
+                let mut normal = vec![];
+                if let Some(&id) = ids.get(v) {
+                    put(&mut normal, (id + if v3 { 4 } else { 2 }) as u64);
+                } else {
+                    normal.push(0);
+                    value_put(&mut normal, v, opt.compact_signatures);
+                }
+                if v3
+                    && opt.context_delta
+                    && let Some((width, z)) = part.deltas[&key][at]
+                {
+                    let mut d = vec![if width == 4 { 2 } else { 3 }];
+                    put(&mut d, z);
+                    if d.len() < normal.len() {
+                        tokens.extend(d);
+                        continue;
+                    }
+                }
+                tokens.extend(normal);
+            } else {
+                tokens.push(1);
+            }
+        }
+        let candidate = if opt.numeric_delta && vs.iter().all(Option::is_some) {
+            delta(
+                &vs.iter()
+                    .map(|v| v.as_ref().unwrap().clone())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        let (mode, encoded) = if let Some(d) = candidate {
+            if compress(&d)?.len() < compress(&tokens)?.len() {
+                ndelta += 1;
+                (1, d)
+            } else {
+                (0, tokens)
+            }
+        } else {
+            (0, tokens)
+        };
+        let (mode, encoded) = if let Some(joint) = joint_encoded {
+            if compress(&joint)?.len() < compress(&encoded)?.len() {
+                (2, joint)
+            } else {
+                (mode, encoded)
+            }
+        } else {
+            (mode, encoded)
+        };
+        let (mode, encoded) = if opt.joint && opt.recent {
+            let candidate =
+                joint::encode_recent(vs, &part.deltas[&key], ids, opt.compact_signatures, true)?;
+            if compress(&candidate)?.len() < compress(&encoded)?.len() {
+                (2, candidate)
+            } else {
+                (mode, encoded)
+            }
+        } else {
+            (mode, encoded)
+        };
+        out.push(mode);
+        blob(out, &encoded);
+    }
+    Ok((ndelta, out.len() - column_start))
+}
+/// Exact bytes of a row as `rows_bytes` writes it.
+fn row_size(row: &Row) -> usize {
+    20 + row.header.len()
+        + row
+            .txs
+            .iter()
+            .map(|(t, m)| 8 + t.len() + m.len())
+            .sum::<usize>()
+        + row.patches.iter().map(|(_, v)| 36 + v.len()).sum::<usize>()
 }
 fn compress(b: &[u8]) -> Res<Vec<u8>> {
     zstd::bulk::compress(b, 19).map_err(er)
@@ -588,6 +759,9 @@ pub struct Options {
     pub chronological: bool,
     pub hash_order: bool,
     pub cached_slots: bool,
+    /// JC06: cut the block into parts of at most this many exact bytes (whole
+    /// ledgers), each readable on its own; 0 keeps one part (JC05).
+    pub part_raw: usize,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -606,6 +780,7 @@ impl Default for Options {
             chronological: false,
             hash_order: false,
             cached_slots: false,
+            part_raw: 0,
         }
     }
 }
@@ -626,6 +801,11 @@ pub struct Stats {
     pub reordered_ledgers: usize,
     pub canonical_ledgers: usize,
     pub order_bytes: usize,
+    pub parts: usize,
+    pub shared_bytes: usize,
+    /// JC06: entries in the parts' own dictionaries, and their bytes.
+    pub local_values: usize,
+    pub local_bytes: usize,
 }
 /// Stable physical processing order; source order is restored by a stored permutation.
 /// Malformed/missing/duplicate TransactionIndex falls back to original order.
@@ -661,10 +841,26 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
         cached_slots: opt.cached_slots,
         ..Build::default()
     };
+    let chunked = opt.part_raw > 0;
+    if chunked && !v5 {
+        return Err("parts require sequential options".into());
+    }
     let (mut reordered_ledgers, mut canonical_ledgers, mut order_bytes) = (0, 0, 0);
     let mut layout = vec![];
     put(&mut layout, rows.len() as u64);
+    let mut parts = vec![];
+    let mut part_ledgers = vec![];
+    let mut orders = vec![];
+    let (mut part_raw, mut part_rows) = (0usize, 0usize);
     for r in rows {
+        let size = row_size(r);
+        if chunked && part_rows > 0 && part_raw + size > opt.part_raw {
+            parts.push(b.take_part());
+            part_ledgers.push(part_rows);
+            (part_raw, part_rows) = (0, 0);
+        }
+        part_raw += size;
+        part_rows += 1;
         put(&mut layout, u64::from(r.seq));
         b.external(0xffff_0002, &r.header);
         put(&mut layout, r.txs.len() as u64);
@@ -692,11 +888,12 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
             }
             order_bytes += layout.len() - order_start;
         }
-        for i in order {
+        for &i in &order {
             let (t, m) = &r.txs[i];
             b.document(t, true, 0)?;
             b.document(m, false, 0)?
         }
+        orders.push(order);
         put(&mut layout, r.patches.len() as u64);
         for (k, v) in &r.patches {
             b.external(0xffff_0003, k);
@@ -704,12 +901,42 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
             b.document(v, false, ctx)?
         }
     }
-    let hashes: HashMap<Vec<u8>, usize> = rows
-        .iter()
-        .flat_map(|r| r.txs.iter())
-        .enumerate()
-        .map(|(i, (t, _))| (shamap::tx_id(t).to_vec(), i))
-        .collect();
+    parts.push(b.take_part());
+    part_ledgers.push(part_rows);
+    // A derived hash names its transaction by position: in JC06 the position
+    // in encoding order, which a reader finds without hashing a ledger; before
+    // JC06 the position in the original order.
+    let mut hashes: HashMap<Vec<u8>, usize> = if chunked {
+        rows.iter()
+            .zip(&orders)
+            .flat_map(|(r, o)| o.iter().map(|&i| &r.txs[i].0))
+            .enumerate()
+            .map(|(i, t)| (shamap::tx_id(t).to_vec(), i))
+            .collect()
+    } else {
+        rows.iter()
+            .flat_map(|r| r.txs.iter())
+            .enumerate()
+            .map(|(i, (t, _))| (shamap::tx_id(t).to_vec(), i))
+            .collect()
+    };
+    // In JC06 a derived hash names a transaction of the same part as every
+    // use of it, so reading a part never compiles another.
+    if chunked {
+        let mut tx_part = vec![];
+        let mut ledger = 0;
+        for (p, &n) in part_ledgers.iter().enumerate() {
+            for r in &rows[ledger..ledger + n] {
+                tx_part.extend(std::iter::repeat_n(p, r.txs.len()));
+            }
+            ledger += n;
+        }
+        hashes.retain(|v, i| {
+            b.value_parts
+                .get(v)
+                .is_none_or(|&(a, z)| a == z && a == tx_part[*i])
+        });
+    }
     let kr = if opt.derive_keys {
         key_recipes(rows)
     } else {
@@ -728,6 +955,18 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
         .collect();
     // Lexicographic dictionary order improves common prefixes; deterministic output.
     values.sort();
+    // JC06: a value only one part uses goes to that part's own dictionary,
+    // which only reading that part has to decode.
+    let mut local: Vec<Vec<Vec<u8>>> = vec![vec![]; parts.len()];
+    if chunked {
+        values.retain(|v| match b.value_parts.get(v) {
+            Some(&(a, z)) if a == z => {
+                local[a].push(v.clone());
+                false
+            }
+            _ => true,
+        });
+    }
     let ids: HashMap<_, _> = values
         .iter()
         .cloned()
@@ -735,7 +974,9 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
         .map(|(i, v)| (v, i))
         .collect();
     let v3 = opt.split_shapes || opt.context_delta || opt.joint;
-    let mut out = if v5 {
+    let mut out = if chunked {
+        b"JC06"
+    } else if v5 {
         b"JC05"
     } else if opt.joint {
         b"JC04"
@@ -746,38 +987,51 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
     }
     .to_vec();
     blob(&mut out, &layout);
+    if chunked {
+        let mut p = vec![];
+        put(&mut p, part_ledgers.len() as u64);
+        for &n in &part_ledgers {
+            put(&mut p, n as u64);
+        }
+        blob(&mut out, &p);
+    }
     let dictionary_start = out.len();
     put(&mut out, values.len() as u64);
     let mut derived = 0;
     let mut derived_keys = 0;
-    for v in &values {
+    // A dictionary entry: a hash derived from a transaction of the block, a
+    // key derived from its arguments (dictionary ids or literals), or the value.
+    let mut entry = |out: &mut Vec<u8>, v: &Vec<u8>, ids: &HashMap<Vec<u8>, usize>| {
         if v.len() == 32 && !b.tx_values.contains(v) {
             if opt.derive_hashes
                 && let Some(&i) = hashes.get(v)
             {
                 out.push(1);
-                put(&mut out, i as u64);
+                put(out, i as u64);
                 derived += 1;
-                continue;
+                return;
             }
             if let Some((domain, args)) = kr.get(v) {
                 out.push(2);
                 out.push(*domain);
-                put(&mut out, args.len() as u64);
+                put(out, args.len() as u64);
                 for arg in args {
                     if let Some(&id) = ids.get(arg) {
-                        put(&mut out, (id + 1) as u64)
+                        put(out, (id + 1) as u64)
                     } else {
                         out.push(0);
-                        blob(&mut out, arg)
+                        blob(out, arg)
                     }
                 }
                 derived_keys += 1;
-                continue;
+                return;
             }
         }
         out.push(0);
-        value_put(&mut out, v, opt.compact_signatures)
+        value_put(out, v, opt.compact_signatures)
+    };
+    for v in &values {
+        entry(&mut out, v, &ids);
     }
     let dictionary_bytes = out.len() - dictionary_start;
     put(&mut out, b.templates.len() as u64);
@@ -801,140 +1055,90 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
             }
         }
     }
-    put(&mut out, b.shapes.len() as u64);
-    if v3 {
-        let mut shapes = vec![];
-        let mut contexts = vec![];
-        let mut prev = 0u64;
-        for (&id, &ctx) in b.shapes.iter().zip(&b.contexts) {
-            put(&mut shapes, id as u64);
-            let d = (ctx as u64).wrapping_sub(prev) as i64;
-            put(&mut contexts, ((d as u64) << 1) ^ ((d >> 63) as u64));
-            prev = ctx as u64;
-        }
-        blob(&mut out, &shapes);
-        blob(&mut out, &contexts);
-    } else {
-        for (&id, &ctx) in b.shapes.iter().zip(&b.contexts) {
-            put(&mut out, id as u64);
-            put(&mut out, ctx as u64);
-        }
-    }
-    let mut columns: Vec<_> = b.columns.iter().collect();
-    columns.sort_by_key(|x| *x.0);
-    let column_start = out.len();
-    put(&mut out, columns.len() as u64);
+    let shared_len = out.len();
+    let mut part_bytes = vec![];
     let mut ndelta = 0;
-    for (&key, vs) in columns {
-        put(&mut out, u64::from(key));
-        put(&mut out, vs.len() as u64);
-        let joint_encoded = if opt.joint {
-            Some(joint::encode(
-                vs,
-                &b.deltas[&key],
-                &ids,
-                opt.compact_signatures,
-            )?)
-        } else {
-            None
-        };
-        if opt.joint && !opt.adaptive {
-            out.push(2);
-            blob(&mut out, joint_encoded.as_ref().unwrap());
-            continue;
-        }
-        let mut tokens = vec![];
-        for (at, v) in vs.iter().enumerate() {
-            if let Some(v) = v {
-                let mut normal = vec![];
-                if let Some(&id) = ids.get(v) {
-                    put(&mut normal, (id + if v3 { 4 } else { 2 }) as u64);
-                } else {
-                    normal.push(0);
-                    value_put(&mut normal, v, opt.compact_signatures);
-                }
-                if v3
-                    && opt.context_delta
-                    && let Some((width, z)) = b.deltas[&key][at]
-                {
-                    let mut d = vec![if width == 4 { 2 } else { 3 }];
-                    put(&mut d, z);
-                    if d.len() < normal.len() {
-                        tokens.extend(d);
-                        continue;
-                    }
-                }
-                tokens.extend(normal);
-            } else {
-                tokens.push(1);
+    let mut column_bytes = 0;
+    let mut local_bytes = 0;
+    for (part, local) in parts.iter().zip(&local) {
+        let mut o = vec![];
+        // A part's dictionary ids follow the shared ones.
+        let mut part_ids;
+        let ids = if chunked {
+            part_ids = ids.clone();
+            for (j, v) in local.iter().enumerate() {
+                part_ids.insert(v.clone(), values.len() + j);
             }
-        }
-        let candidate = if opt.numeric_delta && vs.iter().all(Option::is_some) {
-            delta(
-                &vs.iter()
-                    .map(|v| v.as_ref().unwrap().clone())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
-        let (mode, encoded) = if let Some(d) = candidate {
-            if compress(&d)?.len() < compress(&tokens)?.len() {
-                ndelta += 1;
-                (1, d)
-            } else {
-                (0, tokens)
+            put(&mut o, local.len() as u64);
+            for v in local {
+                entry(&mut o, v, &part_ids);
             }
+            local_bytes += o.len();
+            &part_ids
         } else {
-            (0, tokens)
+            &ids
         };
-        let (mode, encoded) = if let Some(joint) = joint_encoded {
-            if compress(&joint)?.len() < compress(&encoded)?.len() {
-                (2, joint)
-            } else {
-                (mode, encoded)
-            }
-        } else {
-            (mode, encoded)
-        };
-        let (mode, encoded) = if opt.joint && opt.recent {
-            let candidate =
-                joint::encode_recent(vs, &b.deltas[&key], &ids, opt.compact_signatures, true)?;
-            if compress(&candidate)?.len() < compress(&encoded)?.len() {
-                (2, candidate)
-            } else {
-                (mode, encoded)
-            }
-        } else {
-            (mode, encoded)
-        };
-        out.push(mode);
-        blob(&mut out, &encoded);
+        let (n, c) = part_streams(&mut o, part, ids, opt, v3)?;
+        ndelta += n;
+        column_bytes += c;
+        part_bytes.push(o);
     }
-    if out.len() > MAX {
+    let columns_total: usize = parts.iter().map(|p| p.columns.len()).sum();
+    if !chunked {
+        out.extend(part_bytes.pop().unwrap());
+    }
+    let inner = out.len() + part_bytes.iter().map(Vec::len).sum::<usize>();
+    if out.len() > MAX || part_bytes.iter().any(|p| p.len() > MAX) {
         return Err("journal block exceeds 256 MiB; choose fewer ledgers".into());
     }
-    let z = compress(&out)?;
     let mut stats = Stats {
         dictionary_values: values.len(),
         derived_hashes: derived,
         templates: b.templates.len(),
-        columns: b.columns.len(),
+        columns: columns_total,
         literal_objects: b.literal_objects,
-        inner_bytes: out.len(),
-        compressed_bytes: z.len() + 8,
+        inner_bytes: inner,
         delta_columns: ndelta,
         derived_keys,
         context_repeats: b.repeat_count,
-        dictionary_bytes,
-        column_bytes: out.len() - column_start,
+        dictionary_bytes: dictionary_bytes + local_bytes,
+        column_bytes,
         reordered_ledgers,
         canonical_ledgers,
         order_bytes,
+        parts: parts.len(),
+        shared_bytes: shared_len,
+        ..Stats::default()
     };
+    stats.local_values = local.iter().map(Vec::len).sum();
+    stats.local_bytes = local_bytes;
     let mut frame = vec![];
-    frame.extend((out.len() as u64).to_le_bytes());
-    frame.extend(z);
+    if !chunked {
+        let z = compress(&out)?;
+        frame.extend((out.len() as u64).to_le_bytes());
+        frame.extend(z);
+    } else {
+        // JC06 frame: sizes of the shared section and of every part, then the
+        // shared section and each part compressed on their own, a part with the
+        // shared section as its dictionary.
+        let z = compress(&out)?;
+        let mut c = zstd::bulk::Compressor::with_dictionary(19, &out).map_err(er)?;
+        let zs = part_bytes
+            .iter()
+            .map(|p| c.compress(p).map_err(er))
+            .collect::<Res<Vec<_>>>()?;
+        frame.extend((out.len() as u64).to_le_bytes());
+        frame.extend((z.len() as u64).to_le_bytes());
+        frame.extend((zs.len() as u32).to_le_bytes());
+        for (p, zp) in part_bytes.iter().zip(&zs) {
+            frame.extend((p.len() as u64).to_le_bytes());
+            frame.extend((zp.len() as u64).to_le_bytes());
+        }
+        frame.extend(z);
+        for zp in zs {
+            frame.extend(zp);
+        }
+    }
     stats.compressed_bytes = frame.len();
     Ok((frame, stats))
 }
@@ -1291,20 +1495,29 @@ pub fn pack_bounded(
             return Err("raw block exceeds 256 MiB; choose fewer ledgers".into());
         }
         let (frame, s) = encode_block(rs, opt)?;
-        let z = compress(&raw)?;
         let mut payload = vec![];
-        if frame.len() < z.len() + 8 {
-            payload.push(1);
+        if opt.part_raw > 0 {
+            // Parts are kept even where plain zstd of the raw rows would be
+            // smaller (tiny blocks): a raw block is read whole. So that is not tried.
+            payload.push(2);
             payload.extend(frame)
         } else {
-            payload.push(0);
-            payload.extend((raw.len() as u64).to_le_bytes());
-            payload.extend(z)
+            let z = compress(&raw)?;
+            if frame.len() < z.len() + 8 {
+                payload.push(1);
+                payload.extend(frame)
+            } else {
+                payload.push(0);
+                payload.extend((raw.len() as u64).to_le_bytes());
+                payload.extend(z)
+            }
         }
         blocks.push((rs[0].seq, rs.len(), sha512_half(&raw), payload));
         stats.push(s);
     }
-    let mut out = if opt.chronological || opt.cached_slots {
+    let mut out = if opt.part_raw > 0 {
+        b"ASTJ6\0\0\0"
+    } else if opt.chronological || opt.cached_slots {
         b"ASTJ5\0\0\0"
     } else if opt.joint {
         b"ASTJ4\0\0\0"
@@ -1336,6 +1549,7 @@ pub fn unpack(archive: &[u8]) -> Res<Vec<Row>> {
         && magic != b"ASTJ3\0\0\0"
         && magic != b"ASTJ4\0\0\0"
         && magic != b"ASTJ5\0\0\0"
+        && magic != b"ASTJ6\0\0\0"
     {
         return Err("archive magic".into());
     }
@@ -1368,6 +1582,7 @@ pub fn unpack(archive: &[u8]) -> Res<Vec<Row>> {
         let mut p = Read::new(payload);
         let rs = match p.byte()? {
             1 => decode_block(&payload[1..])?,
+            2 => fast::Prepared::parse_parts(&payload[1..])?.all_rows()?,
             0 => {
                 let rawlen = u64::from_le_bytes(p.take(8)?.try_into().unwrap());
                 if rawlen > MAX as u64 {
@@ -1417,6 +1632,7 @@ impl ArchiveFile {
             && &head[..8] != b"ASTJ3\0\0\0"
             && &head[..8] != b"ASTJ4\0\0\0"
             && &head[..8] != b"ASTJ5\0\0\0"
+            && &head[..8] != b"ASTJ6\0\0\0"
         {
             return Err("archive magic".into());
         }
@@ -1480,6 +1696,7 @@ impl ArchiveFile {
         let mut p = Read::new(&payload);
         let rows = match p.byte()? {
             1 => decode_block(&payload[1..])?,
+            2 => fast::Prepared::parse_parts(&payload[1..])?.all_rows()?,
             0 => {
                 let n = u64::from_le_bytes(p.take(8)?.try_into().unwrap());
                 if n > MAX as u64 {
@@ -1879,5 +2096,127 @@ mod sequential_tests {
             assert_eq!(p.all_rows().unwrap(), vec![r.clone()]);
             assert_eq!(decode_block(&f).unwrap(), vec![r.clone()]);
         }
+    }
+}
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+    fn value(n: u32) -> Vec<u8> {
+        let mut b = vec![0x24];
+        b.extend(n.to_be_bytes());
+        b
+    }
+    fn meta(index: u32, hash: &[u8; 32], n: u32) -> Vec<u8> {
+        let mut b = vec![0x20, 28];
+        b.extend(index.to_be_bytes());
+        b.push(0x55);
+        b.extend(hash);
+        b.push(0xe7);
+        b.extend(value(n));
+        b.push(0xe1);
+        b
+    }
+    fn options(part_raw: usize) -> Options {
+        Options {
+            joint: true,
+            adaptive: true,
+            context_delta: true,
+            split_shapes: true,
+            chronological: true,
+            cached_slots: true,
+            hash_order: true,
+            part_raw,
+            ..Options::default()
+        }
+    }
+    /// Ledgers whose metadata names transactions of other ledgers, some stored
+    /// in hash order and some not, with changes to the same objects.
+    fn rows() -> Vec<Row> {
+        let tx = |k: u32, i: u32| value(k * 100 + i);
+        (0..12u32)
+            .map(|k| {
+                let n = 2 + k % 4;
+                let mut txs: Vec<_> = (0..n)
+                    .map(|i| {
+                        // The first transaction names one of another ledger, the
+                        // rest name the first, which nothing else names.
+                        let other = if i == 0 {
+                            tx((k + 5) % 12, 1)
+                        } else {
+                            tx(k, 0)
+                        };
+                        (tx(k, i), meta(i, &shamap::tx_id(&other), k + i))
+                    })
+                    .collect();
+                if k % 2 == 0 {
+                    txs.sort_by_key(|(t, _)| shamap::tx_id(t));
+                } else {
+                    txs.reverse();
+                }
+                Row {
+                    seq: 1 + k,
+                    header: value(k),
+                    txs,
+                    patches: vec![([(k % 3) as u8; 32], value(k)), ([9; 32], value(k / 2))],
+                }
+            })
+            .collect()
+    }
+    #[test]
+    fn parts_restore_every_row() {
+        let rs = rows();
+        let (whole, _) = encode_block(&rs, options(0)).unwrap();
+        let (frame, s) = encode_block(&rs, options(150)).unwrap();
+        assert!(s.parts > 3 && s.derived_hashes > 0);
+        assert_eq!(decode_block(&whole).unwrap(), rs);
+        assert_eq!(
+            fast::Prepared::parse_parts(&frame)
+                .unwrap()
+                .all_rows()
+                .unwrap(),
+            rs
+        );
+        let mut p = fast::Prepared::open_parts(&frame).unwrap();
+        assert_eq!(p.compiled_parts(), 0);
+        for k in [7, 0, 11, 3] {
+            assert_eq!(p.row(k).unwrap(), rs[k]);
+        }
+        assert!(fast::Prepared::open(&frame).is_err());
+        assert!(fast::Prepared::open_parts(&whole).is_err());
+    }
+    #[test]
+    fn one_transaction_compiles_only_its_part() {
+        let rs = rows();
+        let (frame, s) = encode_block(&rs, options(150)).unwrap();
+        let (whole, _) = encode_block(&rs, options(0)).unwrap();
+        for k in [6usize, 1, 10] {
+            let mut p = fast::Prepared::open_parts(&frame).unwrap();
+            let mut q = fast::Prepared::open(&whole).unwrap();
+            for i in 0..rs[k].txs.len() as u32 {
+                let want = rs[k]
+                    .txs
+                    .iter()
+                    .find(|(_, m)| m[2..6] == i.to_be_bytes())
+                    .cloned();
+                assert_eq!(p.tx_with_index(k, i).unwrap(), want);
+                assert_eq!(q.tx_with_index(k, i).unwrap(), want);
+            }
+            assert_eq!(p.tx_with_index(k, 40).unwrap(), None);
+            assert_eq!(p.header(k).unwrap(), rs[k].header);
+            // Hashes of transactions in other parts are stored, not derived.
+            assert_eq!(p.compiled_parts(), 1);
+            assert!(s.parts > 1);
+        }
+    }
+    #[test]
+    fn a_damaged_part_fails_only_its_ledgers() {
+        let rs = rows();
+        let (mut frame, s) = encode_block(&rs, options(150)).unwrap();
+        let last = frame.len() - 3;
+        frame[last] ^= 0x55;
+        let mut p = fast::Prepared::open_parts(&frame).unwrap();
+        assert!(s.parts > 1);
+        assert_eq!(p.row(0).unwrap(), rs[0]);
+        assert_ne!(p.row(rs.len() - 1), Ok(rs[rs.len() - 1].clone()));
     }
 }

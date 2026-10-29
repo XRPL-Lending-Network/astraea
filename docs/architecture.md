@@ -25,17 +25,19 @@ Recent history and state live in the hot store under `<data-dir>`:
 
 ### Cold store
 
-Ledgers older than the state snapshot have transactions but no queryable state. They live in cold segments written in the ASTJ5 format (`crates/astj5`). A segment with first ledger `F` is four files, plus an optional seal:
+Ledgers older than the state snapshot have transactions but no queryable state. They live in cold segments written in the ASTJ6 format (`crates/astj5`), which is ASTJ5 with its blocks cut into parts; older ASTJ5 segments are read as before. A segment with first ledger `F` is four files, plus an optional seal:
 
 | File | Contents |
 |---|---|
-| `cold-F.astj` | independent blocks of up to 1024 ledgers or 4 MiB, each with a SHA-512Half of its exact bytes |
+| `cold-F.astj` | independent blocks of up to 1024 ledgers or 4 MiB, each with a SHA-512Half of its exact bytes; an ASTJ6 block is cut into parts of up to 1 MiB |
 | `cold-F.asix` | ASIX2 indexes built by the codec |
 | `cold-F.kinds` | kind of each state change, when the source recorded it |
-| `cold-F.seal` | digest of each block's stored bytes, recorded after the block passed the full check |
+| `cold-F.seal` | digests of each block's stored bytes (of an ASTJ6 block, its head and every part), recorded after the block passed the full check |
 | `cold-F.json` | manifest: range, profile, sizes and hashes of the other files; written last |
 
 Every block gets a full check: its hash, the transaction roots of its ledgers and the header chain. The check costs about as much as decoding the block, so it runs once, when the segment is written, and the seal records it. When a block is loaded for reading, the server hashes its stored bytes and compares them with the seal. If they match, the block is decoded without repeating the check. If they don't, or the segment has no seal, the block is checked in full again. A damaged block becomes an error, never a wrong answer. Segments written before seals existed can be sealed with `astraea-state history-cold-seal DIR`.
+
+An ASTJ5 block decodes only as a whole, so a page of `account_tx` that finds one transaction in each of 200 blocks decodes 200 blocks of 4 MiB, about 7 ms each. An ASTJ6 block keeps the codec's dictionary and templates in a shared section and cuts the ledgers into parts of up to 1 MiB of exact bytes. Each part has its own columns, its own dictionary for the values no other part uses, and its own zstd frame compressed against the shared section. Repeats and transaction hashes derived from other transactions don't reach outside a part. Reading one transaction then decodes the shared section and one part, about 2 ms on recent history, and only those bytes are hashed against the seal. Parts cost 8% in size on recent history and 17% around ledger 98 million. `astraea-state history-cold-recode DIR` rewrites ASTJ5 segments as ASTJ6 in place while the server runs.
 
 Cold segments are grouped into index partitions (`coldidx-F.*`) for transaction-by-hash, account history and ledger-by-hash lookups. These are read straight from disk with positioned reads, so memory use doesn't grow with history.
 

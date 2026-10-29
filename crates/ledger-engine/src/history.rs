@@ -881,16 +881,20 @@ impl HistoryReader {
         self.cold().header(seq)
     }
 
-    /// Several ledgers without state changes from cold history, read in
-    /// parallel by block. Ledgers that hot history files hold are left out, as
-    /// are ledgers cold history doesn't have: `get_txs_known` serves those.
-    pub fn cold_txs(&self, seqs: &[u32]) -> Res<std::collections::HashMap<u32, Ledger>> {
-        let cold: Vec<u32> = seqs
+    /// Cold ledgers holding only the asked transactions (ledger,
+    /// TransactionIndex) and their headers, read in parallel by block. Ledgers
+    /// that hot history files hold are left out, as are ledgers cold history
+    /// doesn't have: `get_txs_known` serves those.
+    pub fn cold_transactions(
+        &self,
+        wants: &[(u32, u32)],
+    ) -> Res<std::collections::HashMap<u32, Ledger>> {
+        let cold: Vec<(u32, u32)> = wants
             .iter()
             .copied()
-            .filter(|&s| self.cold_first || self.find(s).is_none())
+            .filter(|&(s, _)| self.cold_first || self.find(s).is_none())
             .collect();
-        self.cold().ledgers(&cold)
+        self.cold().transactions(&cold)
     }
 
     /// A ledger without state changes (header and transactions), for the API.

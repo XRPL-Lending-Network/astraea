@@ -906,17 +906,16 @@ impl Engine {
             },
         };
         let binary = as_bool(p.get("binary"));
-        // Cold ledgers of the page are read up front, block by block in parallel:
-        // one by one, every block costs a full prepare in turn.
+        // Cold transactions of the page are read up front, block by block in
+        // parallel, and only those: a ledger's other transactions are not decoded.
         let hot_first = self.hot_first()?;
-        let mut cold_seqs: Vec<u32> = page
+        let wants: Vec<(u32, u32)> = page
             .transactions
             .iter()
-            .map(|t| t.at.ledger)
-            .filter(|&s| s < hot_first)
+            .filter(|t| t.at.ledger < hot_first && t.pos == u32::MAX)
+            .map(|t| (t.at.ledger, t.at.index))
             .collect();
-        cold_seqs.dedup();
-        let mut cold = self.blocks.cold_txs(&cold_seqs).map_err(internal)?;
+        let mut cold = self.blocks.cold_transactions(&wants).map_err(internal)?;
         let mut out = Vec::with_capacity(page.transactions.len());
         let mut cache: Option<(u32, Ledger)> = None;
         for t in &page.transactions {

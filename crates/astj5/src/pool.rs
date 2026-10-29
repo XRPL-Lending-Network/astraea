@@ -11,11 +11,17 @@
 //! one ledger at a time against the directory SHA512Half, ledger sequence,
 //! transaction roots and the internal parent chain.
 //!
+//! JC06 blocks open with their shared section only, and a part compiles when
+//! one of its ledgers is first read; the cached size of a block grows with its
+//! compiled parts. `tx_with_index` reads one transaction that way.
+//!
 //! That check costs about as much as preparing the block. A seal
 //! (`Pool::seal`) records, for every block that passed it, a digest of the
 //! stored block bytes. With a seal set (`set_seal`), a block whose bytes still
 //! match its digest is prepared without repeating the check; any other block is
-//! checked in full as before.
+//! checked in full as before. A JC06 block has a digest of its head (sizes and
+//! shared section) and one per part: a read checks the head and the parts it
+//! compiles, not the whole block.
 use super::*;
 use sha2::{Digest, Sha512};
 use std::os::unix::fs::FileExt;
@@ -25,6 +31,13 @@ enum Data {
     Rows(Vec<Row>),
 }
 type Cell = Arc<OnceLock<Result<Arc<Mutex<Data>>, String>>>;
+/// One transaction with the header of its ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxAt {
+    pub header: Vec<u8>,
+    pub tx: Vec<u8>,
+    pub meta: Vec<u8>,
+}
 struct Slot {
     index: usize,
     cell: Cell,
@@ -39,15 +52,20 @@ pub struct Pool {
     preparing: (Mutex<usize>, Condvar),
     max_prepares: usize,
     loads: std::sync::atomic::AtomicUsize,
-    seal: Vec<[u8; 32]>,
+    seal: Vec<Vec<[u8; 32]>>,
 }
-/// Digest of a checked block in a seal: the directory hash and the stored bytes.
-fn seal_digest(hash: &[u8; 32], payload: &[u8]) -> [u8; 32] {
-    let mut h = Sha512::new();
-    h.update(b"XWCS");
-    h.update(hash);
-    h.update(payload);
-    h.finalize()[..32].try_into().unwrap()
+/// Seal digests of a block's stored bytes: the whole payload, or for JC06 the
+/// head and then every part.
+fn block_digests(hash: &[u8; 32], payload: &[u8]) -> Res<Vec<[u8; 32]>> {
+    if payload.first() != Some(&2) {
+        return Ok(vec![seal_digest(hash, payload)]);
+    }
+    let l = fast::frame_parts(&payload[1..])?;
+    let mut out = vec![seal_digest(hash, &payload[..1 + l.head])];
+    for (r, _) in l.parts {
+        out.push(seal_digest(hash, &payload[1 + r.start..1 + r.end]));
+    }
+    Ok(out)
 }
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +73,12 @@ impl std::fmt::Debug for Pool {
             .field("blocks", &self.entries.len())
             .field("budget", &self.budget)
             .finish_non_exhaustive()
+    }
+}
+fn compiled(d: &Data) -> usize {
+    match d {
+        Data::Prepared(f) => f.compiled_parts(),
+        Data::Rows(_) => 0,
     }
 }
 fn data_bytes(d: &Data) -> usize {
@@ -91,14 +115,14 @@ impl Pool {
         })
     }
     /// Checks every block in full, on up to `threads` threads, and returns
-    /// the seal: one digest per block, in directory order.
-    pub fn seal(&self, threads: usize) -> Res<Vec<[u8; 32]>> {
+    /// the seal: the digests of every block, in directory order.
+    pub fn seal(&self, threads: usize) -> Res<Vec<Vec<[u8; 32]>>> {
         let next = std::sync::atomic::AtomicUsize::new(0);
         let n = self.entries.len();
         let parts = std::thread::scope(|sc| {
             let workers: Vec<_> = (0..threads.clamp(1, n.max(1)))
                 .map(|_| {
-                    sc.spawn(|| -> Res<Vec<(usize, [u8; 32])>> {
+                    sc.spawn(|| -> Res<Vec<(usize, Vec<[u8; 32]>)>> {
                         let mut got = vec![];
                         loop {
                             let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -107,7 +131,7 @@ impl Pool {
                             }
                             let payload = self.payload(i)?;
                             self.decode(i, &payload, false)?;
-                            got.push((i, seal_digest(&self.entries[i].hash, &payload)));
+                            got.push((i, block_digests(&self.entries[i].hash, &payload)?));
                         }
                     })
                 })
@@ -120,7 +144,7 @@ impl Pool {
                 })
                 .collect::<Vec<_>>()
         });
-        let mut out = vec![[0u8; 32]; n];
+        let mut out = vec![vec![]; n];
         for p in parts {
             for (i, d) in p? {
                 out[i] = d;
@@ -130,7 +154,7 @@ impl Pool {
     }
     /// Sets the seal from `seal` (as returned by `seal` for this archive). A
     /// seal with the wrong number of digests is refused.
-    pub fn set_seal(&mut self, seal: Vec<[u8; 32]>) -> Res<()> {
+    pub fn set_seal(&mut self, seal: Vec<Vec<[u8; 32]>>) -> Res<()> {
         if seal.len() != self.entries.len() {
             return Err("seal does not match the archive's blocks".into());
         }
@@ -187,11 +211,25 @@ impl Pool {
     }
     fn load_inner(&self, i: usize) -> Res<Data> {
         let payload = self.payload(i)?;
-        let sealed = self
-            .seal
-            .get(i)
-            .is_some_and(|d| *d == seal_digest(&self.entries[i].hash, &payload));
-        let data = self.decode(i, &payload, sealed)?;
+        let hash = &self.entries[i].hash;
+        let seal = self.seal.get(i).map_or(&[][..], Vec::as_slice);
+        // A JC06 block is trusted by its head here and by each part as it compiles.
+        let parts = if payload.first() == Some(&2) && seal.len() > 1 {
+            fast::frame_parts(&payload[1..])
+                .ok()
+                .filter(|l| {
+                    l.parts.len() + 1 == seal.len()
+                        && seal[0] == seal_digest(hash, &payload[..1 + l.head])
+                })
+                .map(|_| seal[1..].to_vec())
+        } else {
+            None
+        };
+        let sealed = parts.is_some() || (seal.len() == 1 && seal[0] == seal_digest(hash, &payload));
+        let mut data = self.decode(i, &payload, sealed)?;
+        if let (Some(digests), Data::Prepared(f)) = (parts, &mut data) {
+            f.check_parts(*hash, digests)?;
+        }
         self.loads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(data)
@@ -210,14 +248,20 @@ impl Pool {
         let e = &self.entries[i];
         let mut p = Read::new(payload);
         let data = match p.byte()? {
-            1 => {
-                let mut f = fast::Prepared::for_read(&payload[1..])?;
-                if f.layout.len() != e.count {
+            mode @ (1 | 2) => {
+                let mut f = if mode == 1 {
+                    fast::Prepared::open(&payload[1..])?
+                } else {
+                    fast::Prepared::open_parts(&payload[1..])?
+                };
+                if f.ledger_count() != e.count {
                     return Err("block count".into());
                 }
                 if sealed {
-                    for (k, l) in f.layout.iter().enumerate() {
-                        if l.seq != e.first.checked_add(k as u32).ok_or("sequence overflow")? {
+                    for k in 0..e.count {
+                        if f.seq(k)
+                            != Some(e.first.checked_add(k as u32).ok_or("sequence overflow")?)
+                        {
                             return Err("block sequence".into());
                         }
                     }
@@ -271,7 +315,7 @@ impl Pool {
         Ok(data)
     }
     /// Prepared block `i`, preparing it once for all concurrent callers.
-    fn block(&self, i: usize) -> Res<Arc<Mutex<Data>>> {
+    fn block(&self, i: usize) -> Res<(Cell, Arc<Mutex<Data>>)> {
         let cell = {
             let mut g = self.slots.lock().unwrap_or_else(|p| p.into_inner());
             g.1 += 1;
@@ -293,66 +337,80 @@ impl Pool {
         let got = cell
             .get_or_init(|| self.load(i).map(|d| Arc::new(Mutex::new(d))))
             .clone();
-        let mut g = self.slots.lock().unwrap_or_else(|p| p.into_inner());
         match &got {
-            Err(_) => g.0.retain(|s| !Arc::ptr_eq(&s.cell, &cell)),
+            Err(_) => self
+                .slots
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .0
+                .retain(|s| !Arc::ptr_eq(&s.cell, &cell)),
             Ok(d) => {
                 let bytes = data_bytes(&d.lock().unwrap_or_else(|p| p.into_inner()));
-                if let Some(s) = g.0.iter_mut().find(|s| Arc::ptr_eq(&s.cell, &cell)) {
-                    s.bytes = bytes;
-                }
-                // Evict least recently used ready blocks over the budget.
-                loop {
-                    let total: usize = g.0.iter().map(|s| s.bytes).sum();
-                    if total <= self.budget || g.0.len() <= 1 {
-                        break;
-                    }
-                    let Some(k) =
-                        g.0.iter()
-                            .enumerate()
-                            .filter(|(_, s)| s.bytes > 0 && !Arc::ptr_eq(&s.cell, &cell))
-                            .min_by_key(|(_, s)| s.used)
-                            .map(|(k, _)| k)
-                    else {
-                        break;
-                    };
-                    g.0.swap_remove(k);
-                }
+                self.resize(&cell, bytes);
             }
         }
-        got
+        got.map(|d| (cell, d))
     }
-    pub fn ledger(&self, seq: u32) -> Res<Row> {
+    /// Records the size of a cached block and evicts least recently used ready
+    /// blocks over the budget, never that one.
+    fn resize(&self, cell: &Cell, bytes: usize) {
+        let mut g = self.slots.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(s) = g.0.iter_mut().find(|s| Arc::ptr_eq(&s.cell, cell)) {
+            s.bytes = bytes;
+        }
+        loop {
+            let total: usize = g.0.iter().map(|s| s.bytes).sum();
+            if total <= self.budget || g.0.len() <= 1 {
+                break;
+            }
+            let Some(k) =
+                g.0.iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.bytes > 0 && !Arc::ptr_eq(&s.cell, cell))
+                    .min_by_key(|(_, s)| s.used)
+                    .map(|(k, _)| k)
+            else {
+                break;
+            };
+            g.0.swap_remove(k);
+        }
+    }
+    /// Runs `f` on the block holding ledger `seq` with the ledger's position in
+    /// it; a block that compiled more parts on the way is measured again.
+    fn with<T>(&self, seq: u32, f: impl FnOnce(&mut Data, usize) -> Res<T>) -> Res<T> {
         let i = self.block_of(seq)?;
         let local = (seq - self.entries[i].first) as usize;
-        let d = self.block(i)?;
-        let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
-        match &mut *d {
+        let (cell, d) = self.block(i)?;
+        let (out, grown) = {
+            let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
+            let before = compiled(&d);
+            let out = f(&mut d, local);
+            (out, (compiled(&d) != before).then(|| data_bytes(&d)))
+        };
+        if let Some(bytes) = grown {
+            self.resize(&cell, bytes);
+        }
+        out
+    }
+    pub fn ledger(&self, seq: u32) -> Res<Row> {
+        self.with(seq, |d, local| match d {
             Data::Prepared(f) => f.row(local),
             Data::Rows(rows) => rows.get(local).cloned().ok_or("ledger extent".into()),
-        }
+        })
     }
     /// Header of ledger `seq` only.
     pub fn header(&self, seq: u32) -> Res<Vec<u8>> {
-        let i = self.block_of(seq)?;
-        let local = (seq - self.entries[i].first) as usize;
-        let d = self.block(i)?;
-        let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
-        match &mut *d {
+        self.with(seq, |d, local| match d {
             Data::Prepared(f) => f.header(local),
             Data::Rows(rows) => rows
                 .get(local)
                 .map(|r| r.header.clone())
                 .ok_or("ledger extent".into()),
-        }
+        })
     }
     /// Ledger `seq` with transactions but no patches (`patches` is empty).
     pub fn ledger_txs(&self, seq: u32) -> Res<Row> {
-        let i = self.block_of(seq)?;
-        let local = (seq - self.entries[i].first) as usize;
-        let d = self.block(i)?;
-        let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
-        match &mut *d {
+        self.with(seq, |d, local| match d {
             Data::Prepared(f) => f.row_txs(local),
             Data::Rows(rows) => rows
                 .get(local)
@@ -363,18 +421,14 @@ impl Pool {
                     patches: Vec::new(),
                 })
                 .ok_or("ledger extent".into()),
-        }
+        })
     }
     /// Transaction at original storage position `within` of ledger `seq`.
     pub fn tx(&self, seq: u32, within: usize) -> Res<(Vec<u8>, Vec<u8>)> {
-        let i = self.block_of(seq)?;
-        let local = (seq - self.entries[i].first) as usize;
-        let d = self.block(i)?;
-        let mut d = d.lock().unwrap_or_else(|p| p.into_inner());
-        match &mut *d {
+        self.with(seq, |d, local| match d {
             Data::Prepared(f) => {
-                let base: usize = f.layout.iter().take(local).map(|r| r.tx.len()).sum();
-                if f.layout.get(local).is_none_or(|r| within >= r.tx.len()) {
+                let base: usize = (0..local).map(|k| f.txs_in(k).unwrap_or(0)).sum();
+                if f.txs_in(local).is_none_or(|n| within >= n) {
                     return Err("TX extent".into());
                 }
                 f.tx(base + within)
@@ -384,7 +438,33 @@ impl Pool {
                 .and_then(|r| r.txs.get(within))
                 .cloned()
                 .ok_or("TX extent".into()),
-        }
+        })
+    }
+    /// Transaction of ledger `seq` whose metadata has TransactionIndex `index`,
+    /// with the ledger's header; for a JC06 block only the part holding the
+    /// ledger is compiled.
+    pub fn tx_with_index(&self, seq: u32, index: u32) -> Res<Option<TxAt>> {
+        self.with(seq, |d, local| match d {
+            Data::Prepared(f) => match f.tx_with_index(local, index)? {
+                Some((tx, meta)) => Ok(Some(TxAt {
+                    header: f.header(local)?,
+                    tx,
+                    meta,
+                })),
+                None => Ok(None),
+            },
+            Data::Rows(rows) => {
+                let r = rows.get(local).ok_or("ledger extent")?;
+                Ok(r.txs
+                    .iter()
+                    .find(|(_, m)| matches!(**m, [0x20, 0x1C, a, b, c, d, ..] if u32::from_be_bytes([a, b, c, d]) == index))
+                    .map(|(tx, meta)| TxAt {
+                        header: r.header.clone(),
+                        tx: tx.clone(),
+                        meta: meta.clone(),
+                    }))
+            }
+        })
     }
 }
 #[cfg(test)]
@@ -453,6 +533,57 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
+    fn parts_are_compiled_as_their_ledgers_are_read() {
+        let rs = rows(10, 40);
+        let opt = Options {
+            joint: true,
+            adaptive: true,
+            context_delta: true,
+            split_shapes: true,
+            chronological: true,
+            cached_slots: true,
+            hash_order: true,
+            part_raw: 600,
+            ..Options::default()
+        };
+        let (archive, stats) = pack_bounded(&rs, 20, MAX, opt).unwrap();
+        assert!(stats.iter().all(|s| s.parts > 2));
+        assert_eq!(unpack(&archive).unwrap(), rs);
+        let dir = std::env::temp_dir().join(format!("astj5-pool-parts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.astj");
+        std::fs::write(&path, &archive).unwrap();
+        let seal = Pool::open(&path, 1 << 20, 2).unwrap().seal(2).unwrap();
+        assert!(seal.iter().all(|d| d.len() > 3));
+        let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
+        pool.set_seal(seal.clone()).unwrap();
+        assert_eq!(pool.header(31).unwrap(), rs[21].header);
+        let one = pool.cached_bytes();
+        assert_eq!(pool.ledger(12).unwrap(), rs[2]);
+        assert!(pool.cached_bytes() > one);
+        assert_eq!(pool.tx_with_index(15, 0).unwrap(), None);
+        for r in &rs {
+            assert_eq!(pool.ledger_txs(r.seq).unwrap().header, r.header);
+        }
+        // Unsealed, every block is checked in full.
+        let full = Pool::open(&path, 1 << 20, 2).unwrap();
+        assert_eq!(full.ledger(49).unwrap(), rs[39]);
+        // A changed byte in the last part of the first block: under the seal only
+        // reads that compile that part fail; unsealed, the whole block does.
+        let e = &full.entries[0];
+        let mut bad = archive.clone();
+        bad[e.offset as usize + e.length - 1] ^= 1;
+        std::fs::write(&path, &bad).unwrap();
+        let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
+        pool.set_seal(seal.clone()).unwrap();
+        assert_eq!(pool.ledger(10).unwrap(), rs[0]);
+        let err = pool.ledger(29).unwrap_err();
+        assert!(err.contains("seal"), "{err}");
+        assert_eq!(pool.ledger(30).unwrap(), rs[20]);
+        assert!(Pool::open(&path, 1 << 20, 2).unwrap().ledger(10).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
     fn seal_skips_the_check_only_for_unchanged_blocks() {
         for opts in [
             Options::default(),
@@ -473,6 +604,7 @@ mod tests {
             std::fs::write(&path, &archive).unwrap();
             let seal = Pool::open(&path, 1 << 20, 2).unwrap().seal(3).unwrap();
             assert_eq!(seal.len(), 3);
+            assert!(seal.iter().all(|d| d.len() == 1));
             let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
             assert!(pool.set_seal(seal[..2].to_vec()).is_err());
             pool.set_seal(seal.clone()).unwrap();
@@ -511,7 +643,7 @@ mod tests {
         let payload = archive[e.offset as usize..e.offset as usize + e.length].to_vec();
         let mut pool = Pool::open(&path, 1 << 20, 2).unwrap();
         pool.entries[0].hash = [0; 32];
-        pool.set_seal(vec![seal_digest(&[0; 32], &payload)])
+        pool.set_seal(vec![vec![seal_digest(&[0; 32], &payload)]])
             .unwrap();
         assert_eq!(pool.ledger(12).unwrap(), rs[2]);
         std::fs::remove_dir_all(&dir).unwrap();

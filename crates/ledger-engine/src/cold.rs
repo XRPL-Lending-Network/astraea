@@ -8,8 +8,10 @@
 //! - `cold-F.asix`: the codec's four ASIX2 indexes: transaction and ledger by
 //!   hash, account history and object history;
 //! - `cold-F.kinds`: the kind of every state change (`XWCK\0\1`);
-//! - `cold-F.seal`: optional, a digest of every block's stored bytes taken
-//!   after the block passed the full check (`XWCS\0\1`), see below;
+//! - `cold-F.seal`: optional, digests of every block's stored bytes taken
+//!   after the block passed the full check (`XWCS\0\1`, one per block, or
+//!   `XWCS\0\2`, a list per block: a JC06 block has its head and each part),
+//!   see below;
 //! - `cold-F.json`: the manifest with range, profile, change kind mode,
 //!   and size and SHA-512Half of every file. Written last, via a temporary
 //!   file and rename: without a manifest there is no segment.
@@ -54,6 +56,7 @@ type Res<T> = Result<T, String>;
 
 const KINDS_MAGIC: &[u8; 6] = b"XWCK\x00\x01";
 const SEAL_MAGIC: &[u8; 6] = b"XWCS\x00\x01";
+const SEAL_LISTS: &[u8; 6] = b"XWCS\x00\x02";
 /// Default archive block: at most this many ledgers and exact bytes.
 /// The research's canonical profile uses 16 MiB. 4 MiB costs +18.7% in size
 /// at the 104 million epoch and +26% on recent history, but a cold read takes
@@ -61,12 +64,18 @@ const SEAL_MAGIC: &[u8; 6] = b"XWCS\x00\x01";
 /// A ledger larger than the limit gets a block sized to fit it (`write_with`).
 pub const BLOCK_LEDGERS: usize = 1024;
 pub const BLOCK_RAW: usize = 4 << 20;
+/// Blocks are written as JC06: cut into parts of whole ledgers and at most
+/// this many exact bytes, each decoded on its own. Reading one transaction
+/// then costs one part instead of the whole block.
+pub const PART_RAW: usize = 1 << 20;
 
-/// Archive block limit: ledgers and exact bytes.
+/// Archive block limit: ledgers and exact bytes, and the part size (0 writes
+/// JC05 blocks, decoded whole).
 #[derive(Debug, Clone, Copy)]
 pub struct BlockLimit {
     pub ledgers: usize,
     pub raw: usize,
+    pub part: usize,
 }
 
 impl Default for BlockLimit {
@@ -74,6 +83,7 @@ impl Default for BlockLimit {
         BlockLimit {
             ledgers: BLOCK_LEDGERS,
             raw: BLOCK_RAW,
+            part: PART_RAW,
         }
     }
 }
@@ -264,23 +274,45 @@ pub(crate) fn sync_write(path: &Path, bytes: &[u8]) -> Res<()> {
     fs::rename(&tmp, path).map_err(io)
 }
 
-fn seal_bytes(seal: &[[u8; 32]]) -> Vec<u8> {
-    let mut out = SEAL_MAGIC.to_vec();
+/// Seal file: `XWCS\0\1` and one digest per block when every block has one,
+/// otherwise `XWCS\0\2` and, per block, a u32 count and its digests.
+fn seal_bytes(seal: &[Vec<[u8; 32]>]) -> Vec<u8> {
+    let lists = seal.iter().any(|d| d.len() != 1);
+    let mut out = if lists { SEAL_LISTS } else { SEAL_MAGIC }.to_vec();
     out.extend((seal.len() as u32).to_le_bytes());
     for d in seal {
-        out.extend(d);
+        if lists {
+            out.extend((d.len() as u32).to_le_bytes());
+        }
+        for x in d {
+            out.extend(x);
+        }
     }
     out
 }
 
-fn parse_seal(b: &[u8]) -> Option<Vec<[u8; 32]>> {
-    let rest = b.strip_prefix(SEAL_MAGIC)?;
-    let n = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize;
-    let body = &rest[4..];
-    if body.len() != n.checked_mul(32)? {
-        return None;
+fn parse_seal(b: &[u8]) -> Option<Vec<Vec<[u8; 32]>>> {
+    let u32_at = |b: &[u8]| Some(u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize);
+    if let Some(rest) = b.strip_prefix(SEAL_MAGIC) {
+        let n = u32_at(rest)?;
+        let body = &rest[4..];
+        if body.len() != n.checked_mul(32)? {
+            return None;
+        }
+        return Some(body.as_chunks::<32>().0.iter().map(|d| vec![*d]).collect());
     }
-    Some(body.as_chunks::<32>().0.to_vec())
+    let rest = b.strip_prefix(SEAL_LISTS)?;
+    let n = u32_at(rest)?;
+    let mut at = 4;
+    let mut out = Vec::with_capacity(n.min(rest.len() / 36));
+    for _ in 0..n {
+        let k = u32_at(rest.get(at..)?)?;
+        at += 4;
+        let body = rest.get(at..at.checked_add(k.checked_mul(32)?)?)?;
+        out.push(body.as_chunks::<32>().0.to_vec());
+        at += body.len();
+    }
+    (at == rest.len()).then_some(out)
 }
 
 fn names(dir: &Path, first: u32) -> [PathBuf; 4] {
@@ -325,7 +357,11 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
         raw: limit.raw.max(raw),
         ..limit
     };
-    let (archive, _) = pack_bounded(&rows, limit.ledgers, limit.raw, canonical())?;
+    let opt = Options {
+        part_raw: limit.part,
+        ..canonical()
+    };
+    let (archive, _) = pack_bounded(&rows, limit.ledgers, limit.raw, opt)?;
     if unpack(&archive)? != rows {
         return Err("ASTJ5 archive did not restore the ledgers exactly".into());
     }
@@ -349,7 +385,7 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
         |b: &[u8]| json!({"bytes": b.len(), "sha512half": hex::encode_upper(sha512_half(b))});
     let manifest = json!({
         "format": "astraea-cold/1",
-        "payload": "ASTJ5",
+        "payload": if limit.part > 0 { "ASTJ6" } else { "ASTJ5" },
         "profile": "canonical",
         "codec": "astraea-journal-codec 0.1.0 (astraea-journal-sequential-2026-10-27)",
         "first": first,
@@ -360,6 +396,7 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
         "blocks": u32::from_le_bytes(archive[8..12].try_into().map_err(|_| "archive header")?),
         "max_block_ledgers": limit.ledgers,
         "max_block_raw_bytes": limit.raw,
+        "max_part_raw_bytes": limit.part,
         "change_kinds": mode.name(),
         "files": {
             "astj": file(&archive),
@@ -438,7 +475,9 @@ impl ColdSegment {
                 continue;
             }
             let m: Value = serde_json::from_slice(&fs::read(&p).map_err(io)?).map_err(corrupt)?;
-            if m["format"] != "astraea-cold/1" || m["payload"] != "ASTJ5" {
+            if m["format"] != "astraea-cold/1"
+                || !["ASTJ5", "ASTJ6"].map(Value::from).contains(&m["payload"])
+            {
                 return Err(corrupt(format!("{name}: unknown format")));
             }
             let num = |k: &str| m[k].as_u64().and_then(|v| u32::try_from(v).ok());
@@ -526,6 +565,83 @@ impl ColdSegment {
         Ok(real)
     }
 
+    /// Whether the segment's blocks are JC06 (cut into parts).
+    pub fn in_parts(&self) -> bool {
+        self.manifest["payload"] == "ASTJ6"
+    }
+
+    /// Writes the segment again with JC06 blocks of at most `part` exact bytes
+    /// per part, next to the archive (the target of a link). The ledgers,
+    /// indexes and change kinds come out the same, which is checked; the
+    /// archive, seal and manifest are then replaced, each by rename. A reader
+    /// that has the segment open keeps the old archive; one that opens it
+    /// between the renames finds a seal that doesn't match and checks blocks
+    /// in full. Returns the new manifest.
+    pub fn recode(&self, part: usize) -> Res<Value> {
+        let o = self.opened()?;
+        let mut ledgers = Vec::with_capacity((self.last - self.first + 1) as usize);
+        for seq in self.first..=self.last {
+            ledgers.push(if self.kinds == Kinds::Explicit {
+                self.read(&o, seq, true)?
+            } else {
+                // Kinds are not recorded: written the same way as the loader does.
+                let row = o.pool.ledger(seq).map_err(corrupt)?;
+                Ledger {
+                    header: row.header,
+                    transactions: row.txs,
+                    changes: row
+                        .patches
+                        .into_iter()
+                        .map(|(key, data)| StateChange {
+                            key,
+                            change: if data.is_empty() {
+                                Change::Deleted
+                            } else {
+                                Change::Modified
+                            },
+                            data,
+                        })
+                        .collect(),
+                }
+            });
+        }
+        drop(o);
+        let real = fs::canonicalize(&self.paths[0]).map_err(io)?;
+        let dir = real.parent().ok_or("archive without a directory")?;
+        let staging = dir.join(format!(".recode-{:010}", self.first));
+        let _ = fs::remove_dir_all(&staging);
+        let limit = BlockLimit {
+            ledgers: self.manifest["max_block_ledgers"]
+                .as_u64()
+                .map_or(BLOCK_LEDGERS, |n| n as usize),
+            raw: self.manifest["max_block_raw_bytes"]
+                .as_u64()
+                .map_or(BLOCK_RAW, |n| n as usize),
+            part,
+        };
+        let m = write_with(&staging, &ledgers, self.kinds, limit)?;
+        drop(ledgers);
+        let [na, ni, nk, nm] = names(&staging, self.first);
+        for (new, old) in [(&ni, &self.paths[1]), (&nk, &self.paths[2])] {
+            if fs::read(new).map_err(io)? != fs::read(old).map_err(io)? {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(corrupt(format!("{}: recoding changed it", old.display())));
+            }
+        }
+        let target = |p: &Path| -> Res<PathBuf> { fs::canonicalize(p).map_err(io) };
+        fs::rename(&na, &real).map_err(io)?;
+        let seal = real.with_extension("seal");
+        fs::rename(na.with_extension("seal"), &seal).map_err(io)?;
+        if seal != self.seal_path() && fs::symlink_metadata(self.seal_path()).is_err() {
+            std::os::unix::fs::symlink(&seal, self.seal_path()).map_err(io)?;
+        }
+        fs::rename(&nm, target(&self.paths[3])?).map_err(io)?;
+        File::open(dir).and_then(|d| d.sync_all()).map_err(io)?;
+        fs::remove_dir_all(&staging).map_err(io)?;
+        self.close();
+        Ok(m)
+    }
+
     /// Closes the files and frees the block cache; reads in progress finish.
     pub fn close(&self) {
         *self.lock() = None;
@@ -592,6 +708,32 @@ impl ColdSegment {
             return Err(corrupt(format!("at position {seq} found ledger {got}")));
         }
         Ok(raw)
+    }
+
+    /// Header of ledger `seq` and its transactions with the given
+    /// TransactionIndex values, without changes.
+    fn read_txs(&self, o: &Open, seq: u32, indexes: &[u32]) -> Res<Ledger> {
+        let mut header = None;
+        let mut transactions = Vec::with_capacity(indexes.len());
+        for &index in indexes {
+            if let Some(at) = o.pool.tx_with_index(seq, index).map_err(corrupt)? {
+                header.get_or_insert(at.header);
+                transactions.push((at.tx, at.meta));
+            }
+        }
+        let header = match header {
+            Some(h) => h,
+            None => o.pool.header(seq).map_err(corrupt)?,
+        };
+        let got = LedgerHeader::parse(&header).map_err(corrupt)?.sequence;
+        if got != seq {
+            return Err(corrupt(format!("at position {seq} found ledger {got}")));
+        }
+        Ok(Ledger {
+            header,
+            transactions,
+            changes: Vec::new(),
+        })
     }
 
     fn read(&self, o: &Open, seq: u32, with_changes: bool) -> Res<Ledger> {
@@ -753,6 +895,27 @@ impl Cold {
     /// out. Ledgers of one block go to one reader, so the block is prepared
     /// once, and different blocks are read on up to `COLD_READERS` threads.
     pub fn ledgers(&self, seqs: &[u32]) -> Res<HashMap<u32, Ledger>> {
+        self.grouped(seqs, &|seg, o, seq| seg.read(o, seq, false))
+    }
+
+    /// Ledgers holding only the transactions asked for, by ledger and
+    /// TransactionIndex, and their headers; an index the ledger doesn't have is
+    /// left out. In a JC06 block only the part holding a ledger is decoded.
+    pub fn transactions(&self, wants: &[(u32, u32)]) -> Res<HashMap<u32, Ledger>> {
+        let mut by_seq: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for &(seq, index) in wants {
+            by_seq.entry(seq).or_default().push(index);
+        }
+        let seqs: Vec<u32> = by_seq.keys().copied().collect();
+        self.grouped(&seqs, &|seg, o, seq| seg.read_txs(o, seq, &by_seq[&seq]))
+    }
+
+    /// Reads `seqs` with `read`, block by block on up to `COLD_READERS` threads.
+    fn grouped(
+        &self,
+        seqs: &[u32],
+        read: &(dyn Fn(&ColdSegment, &Open, u32) -> Res<Ledger> + Sync),
+    ) -> Res<HashMap<u32, Ledger>> {
         type Group = (Arc<ColdSegment>, Arc<Open>, Vec<u32>);
         let mut open: HashMap<usize, Arc<Open>> = HashMap::new();
         let mut blocks: BTreeMap<(usize, usize), Vec<u32>> = BTreeMap::new();
@@ -775,7 +938,7 @@ impl Cold {
             .collect();
         let read = |(seg, o, seqs): &Group| -> Res<Vec<(u32, Ledger)>> {
             seqs.iter()
-                .map(|&seq| Ok((seq, seg.read(o, seq, false)?)))
+                .map(|&seq| Ok((seq, read(seg, o, seq)?)))
                 .collect()
         };
         let mut out = HashMap::with_capacity(seqs.len());
@@ -921,6 +1084,7 @@ pub(crate) mod tests {
         let small = BlockLimit {
             ledgers: 1024,
             raw: 1024,
+            ..BlockLimit::default()
         };
         let m = write_with(dir.path(), &ls, Kinds::Explicit, small).unwrap();
         assert!(m["max_block_raw_bytes"].as_u64().unwrap() > 3000);
@@ -931,12 +1095,134 @@ pub(crate) mod tests {
         }
     }
 
+    /// A chain of ledgers with transactions (in hash order, as ledgers store
+    /// them) and a matching transaction root, and the changes of `chain`.
+    pub(crate) fn chain_with_txs(first: u32, n: u32) -> Vec<Ledger> {
+        let mut out = chain(first, n);
+        let mut parent = [0u8; 32];
+        for (k, l) in out.iter_mut().enumerate() {
+            let mut txs: Vec<(Vec<u8>, Vec<u8>)> = (0..(k as u32 % 4 + 1))
+                .map(|i| {
+                    let mut tx = vec![0x12, 0x00, 0x00, 0x24];
+                    tx.extend((k as u32 * 10 + i).to_be_bytes());
+                    // TransactionIndex, empty AffectedNodes, TransactionResult.
+                    let mut meta = vec![0x20, 0x1C];
+                    meta.extend(i.to_be_bytes());
+                    meta.extend([0xF8, 0xF1, 0x03, 0x10, 0x00]);
+                    (tx, meta)
+                })
+                .collect();
+            txs.sort_by_key(|(t, _)| witness_core::shamap::tx_id(t));
+            let leaves: Vec<_> = txs
+                .iter()
+                .map(|(t, m)| {
+                    let id = witness_core::shamap::tx_id(t);
+                    (id, witness_core::shamap::tx_leaf_hash(t, m, &id))
+                })
+                .collect();
+            l.header[12..44].copy_from_slice(&parent);
+            l.header[44..76].copy_from_slice(&witness_core::shamap::root(&leaves));
+            parent = LedgerHeader::parse(&l.header).unwrap().hash();
+            l.transactions = txs;
+        }
+        out
+    }
+
+    #[test]
+    fn transactions_are_read_alone_by_transaction_index() {
+        for part in [0, 200] {
+            let dir = tempfile::tempdir().unwrap();
+            let ls = chain_with_txs(700, 20);
+            let limit = BlockLimit {
+                ledgers: 8,
+                raw: 1 << 20,
+                part,
+            };
+            let m = write_with(dir.path(), &ls, Kinds::Explicit, limit).unwrap();
+            assert_eq!(m["payload"], if part > 0 { "ASTJ6" } else { "ASTJ5" });
+            let cold = Cold::open(dir.path()).unwrap();
+            for l in &ls {
+                let seq = l.header().unwrap().sequence;
+                assert_eq!(cold.ledger(seq, true).unwrap().unwrap(), *l);
+            }
+            let wants = [(703, 1), (703, 0), (715, 2), (719, 0), (705, 9), (690, 0)];
+            let got = cold.transactions(&wants).unwrap();
+            assert!(!got.contains_key(&690));
+            assert_eq!(got.len(), 4);
+            assert_eq!(got[&703].transactions.len(), 2);
+            assert!(got[&705].transactions.is_empty());
+            for (seq, l) in &got {
+                let full = &ls[(seq - 700) as usize];
+                assert_eq!(l.header, full.header);
+                assert!(l.changes.is_empty());
+                for t in &l.transactions {
+                    assert!(full.transactions.contains(t));
+                }
+            }
+            assert_eq!(got[&715].transactions[0].1[2..6], 2u32.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn segments_are_recoded_in_parts() {
+        for kinds in [Kinds::Explicit, Kinds::NotRecorded] {
+            let dir = tempfile::tempdir().unwrap();
+            let ls = chain_with_txs(800, 30);
+            let limit = BlockLimit {
+                ledgers: 8,
+                raw: 1 << 20,
+                part: 0,
+            };
+            write_with(dir.path(), &ls, kinds, limit).unwrap();
+            let cold = Cold::open(dir.path()).unwrap();
+            let seg = &cold.segments()[0];
+            assert!(!seg.in_parts());
+            let before = cold.ledger(810, false).unwrap().unwrap();
+            let m = seg.recode(300).unwrap();
+            assert_eq!(m["payload"], "ASTJ6");
+            assert!(
+                fs::read_dir(dir.path()).unwrap().all(|e| !e
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with('.'))
+            );
+            // The segment already open reads the new archive once reopened.
+            assert_eq!(cold.ledger(810, false).unwrap().unwrap(), before);
+            let again = Cold::open(dir.path()).unwrap();
+            assert!(again.segments()[0].in_parts());
+            again.segments()[0].verify_files().unwrap();
+            for l in &ls {
+                let seq = l.header().unwrap().sequence;
+                let got = again
+                    .ledger(seq, kinds == Kinds::Explicit)
+                    .unwrap()
+                    .unwrap();
+                if kinds == Kinds::Explicit {
+                    assert_eq!(got, *l);
+                } else {
+                    assert_eq!(
+                        (&got.header, &got.transactions),
+                        (&l.header, &l.transactions)
+                    );
+                }
+            }
+            assert_eq!(
+                again.transactions(&[(805, 1)]).unwrap()[&805]
+                    .transactions
+                    .len(),
+                1
+            );
+        }
+    }
+
     #[test]
     fn ledgers_read_in_parallel_match_single_reads() {
         let dir = tempfile::tempdir().unwrap();
         let small = BlockLimit {
             ledgers: 3,
             raw: 1 << 20,
+            ..BlockLimit::default()
         };
         for f in [100u32, 120, 140] {
             write_with(dir.path(), &chain(f, 12), Kinds::Explicit, small).unwrap();
@@ -961,10 +1247,19 @@ pub(crate) mod tests {
         let small = BlockLimit {
             ledgers: 4,
             raw: 1 << 20,
+            ..BlockLimit::default()
         };
         write_with(dir.path(), &ls, Kinds::Explicit, small).unwrap();
         let seal = dir.path().join("cold-0000000300.seal");
         assert_eq!(parse_seal(&fs::read(&seal).unwrap()).unwrap().len(), 3);
+        let lists = vec![vec![[1; 32]], vec![[2; 32], [3; 32]], vec![]];
+        assert_eq!(parse_seal(&seal_bytes(&lists)), Some(lists.clone()));
+        let one = vec![vec![[4; 32]]; 2];
+        assert_eq!(seal_bytes(&one)[..6], *SEAL_MAGIC);
+        assert_eq!(parse_seal(&seal_bytes(&one)), Some(one));
+        let mut cut = seal_bytes(&lists);
+        cut.pop();
+        assert!(parse_seal(&cut).is_none());
         let read_all = |dir: &Path| {
             let cold = Cold::open(dir).unwrap();
             for l in &ls {
