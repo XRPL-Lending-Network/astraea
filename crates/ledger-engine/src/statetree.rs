@@ -152,6 +152,103 @@ fn encode_node(children: &[Hash; 16]) -> Vec<u8> {
     out
 }
 
+/// One subtree held in memory: its leaves, and the hashes of its inner nodes
+/// kept until a change on their path. Used to replay a subtree on its own.
+pub(crate) struct SubTree {
+    prefix: Hash,
+    depth: usize,
+    leaves: BTreeMap<Hash, Hash>,
+    inner: HashMap<(usize, Hash), Hash>,
+    /// Depth of the deepest inner node ever kept: changes clear up to there.
+    deepest: usize,
+}
+
+impl SubTree {
+    pub(crate) fn new(prefix: Hash, depth: usize) -> Self {
+        Self {
+            prefix,
+            depth,
+            leaves: BTreeMap::new(),
+            inner: HashMap::new(),
+            deepest: depth,
+        }
+    }
+
+    /// Sets a key's leaf hash, or removes the key with `None`.
+    pub(crate) fn set(&mut self, key: Hash, leaf: Option<Hash>) {
+        match leaf {
+            Some(h) => self.leaves.insert(key, h),
+            None => self.leaves.remove(&key),
+        };
+        if self.inner.is_empty() {
+            return;
+        }
+        // Every node on the key's path, also below one that is a leaf now: a
+        // kept hash there would come back stale once the prefix fills again.
+        let mut prefix = range_of(&key, self.depth).0;
+        for d in self.depth..=self.deepest {
+            self.inner.remove(&(d, prefix));
+            prefix = with_nibble(&prefix, d, nibble(&key, d));
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.leaves.len()
+    }
+
+    /// Hash of the subtree by the tree rule: zeros if empty, the leaf if
+    /// alone, else an inner node.
+    pub(crate) fn hash(&mut self) -> Hash {
+        self.node(self.prefix, self.depth)
+    }
+
+    fn node(&mut self, prefix: Hash, depth: usize) -> Hash {
+        let (lo, hi) = range_of(&prefix, depth);
+        let mut under = self.leaves.range(lo..=hi);
+        match (under.next(), under.next()) {
+            (None, _) => return ZERO,
+            (Some((_, h)), None) => return *h,
+            _ => {}
+        }
+        if let Some(h) = self.inner.get(&(depth, lo)) {
+            return *h;
+        }
+        let mut children = [ZERO; 16];
+        for (c, child) in children.iter_mut().enumerate() {
+            *child = self.node(with_nibble(&lo, depth, c as u8), depth + 1);
+        }
+        let h = inner_hash(&children);
+        self.inner.insert((depth, lo), h);
+        self.deepest = self.deepest.max(depth);
+        h
+    }
+}
+
+/// Root of the tree from the hashes and key counts of all `LEVEL_SLOTS`
+/// subtrees at `LEVEL_DEPTH`, by the same rule; the root is always an inner node.
+pub(crate) fn root_of_levels(hashes: &[Hash], counts: &[u32]) -> Hash {
+    fn go(hashes: &[Hash], counts: &[u32], depth: usize) -> Hash {
+        if depth == LEVEL_DEPTH {
+            return hashes[0];
+        }
+        if depth > 0 {
+            match counts.iter().map(|c| u64::from(*c)).sum::<u64>() {
+                0 => return ZERO,
+                1 => return hashes[counts.iter().position(|c| *c == 1).unwrap_or(0)],
+                _ => {}
+            }
+        }
+        let step = hashes.len() / 16;
+        let mut children = [ZERO; 16];
+        for (c, child) in children.iter_mut().enumerate() {
+            let r = c * step..(c + 1) * step;
+            *child = go(&hashes[r.clone()], &counts[r], depth + 1);
+        }
+        inner_hash(&children)
+    }
+    go(hashes, counts, 0)
+}
+
 /// Leaf changes for a ledger: key → new leaf hash, `None` if deleted.
 pub type LeafChanges = BTreeMap<Hash, Option<Hash>>;
 
@@ -440,6 +537,31 @@ mod tests {
             k[..3].copy_from_slice(&[0xAB, 0xCD, 0xEF]);
         }
         k
+    }
+
+    #[test]
+    fn subtrees_in_memory_give_the_root() {
+        // Few keys, so that subtrees and nodes above them hold 0, 1 or more.
+        let mut state: BTreeMap<Hash, Hash> = BTreeMap::new();
+        let mut slots: Vec<SubTree> = (0..LEVEL_SLOTS as u16)
+            .map(|s| SubTree::new(level_range(s).0, LEVEL_DEPTH))
+            .collect();
+        for round in 0..30u32 {
+            for j in 0..40u32 {
+                let i = (round * 53 + j * 17) % (if round < 10 { 60 } else { 3000 });
+                let k = key(i);
+                let v = (j % 5 != 0).then(|| sha512_half(&[i as u8, round as u8]));
+                match v {
+                    Some(h) => state.insert(k, h),
+                    None => state.remove(&k),
+                };
+                slots[level_slot(&k) as usize].set(k, v);
+            }
+            let hashes: Vec<Hash> = slots.iter_mut().map(SubTree::hash).collect();
+            let counts: Vec<u32> = slots.iter().map(|s| s.len() as u32).collect();
+            let want = root(&state.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>());
+            assert_eq!(root_of_levels(&hashes, &counts), want, "round {round}");
+        }
     }
 
     #[test]

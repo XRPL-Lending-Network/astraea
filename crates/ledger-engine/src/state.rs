@@ -440,211 +440,207 @@ impl StateStore {
     }
 
     /// Rebuilds the tree history from the snapshot up to `levels_from`, for a
-    /// store that kept it only from a later ledger. The object versions are
-    /// read in one pass per `window` ledgers; the snapshot's tree is built in
-    /// `scratch` and every ledger's changes are replayed on it in order, with
-    /// the root checked against the ledger's `AccountHash` each time. The
-    /// records are written below the existing ones, and `levels_from` moves
-    /// down to the snapshot only once all of them are in. Returns the range
-    /// rebuilt, `None` if there was nothing to do.
+    /// store that kept it only from a later ledger. Returns the range rebuilt,
+    /// `None` if there was nothing to do.
     ///
-    /// The scratch tree survives a stop: each ledger's nodes go into one batch
-    /// with its records and the number of the ledger, and a later call goes on
-    /// from there once the scratch root matches that ledger's `AccountHash`.
+    /// The subtrees at `LEVEL_DEPTH` don't depend on each other, and the
+    /// object versions of one are a single key range, so `threads` workers
+    /// each take a subtree, read its range once, and replay its versions in
+    /// memory, noting its hash and key count at every ledger that changed it.
+    /// The notes go to `scratch` in one batch per subtree; after a stop, the
+    /// subtrees already noted are not read again. A second pass goes through
+    /// the ledgers in order, puts the top of the tree together from the notes,
+    /// checks it against each ledger's `AccountHash`, and writes the records
+    /// below the existing ones. `levels_from` moves down to the snapshot only
+    /// once all of them are in.
     pub fn backfill_levels(
         &self,
         scratch: &std::path::Path,
-        window: u32,
-        progress: impl Fn(u32, u32),
+        threads: usize,
+        progress: impl Fn(String) + Sync,
     ) -> Result<Option<(u32, u32)>, String> {
-        use crate::statetree::{LeafChanges, state_leaf_hash_of};
+        use crate::statetree::{SubTree, level_range, root_of_levels, state_leaf_hash_of};
         use fjall::Readable as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let (Some(base), Some(to)) = (self.base()?, self.levels_from()?) else {
             return Ok(None);
         };
         if to <= base {
             return Ok(None);
         }
-        let account_hash = |seq: u32| -> Result<[u8; 32], String> {
-            Ok(Ledger {
-                header: self.header(seq)?.ok_or(format!("no header for {seq}"))?,
-                transactions: Vec::new(),
-                changes: Vec::new(),
-            }
-            .header()?
-            .account_hash)
-        };
-        // The replay walks the whole tree; with the default cache it rereads
-        // the same blocks from the page cache for every ledger.
         let open = || -> Result<_, String> {
-            let db = Database::builder(scratch)
-                .cache_size(1 << 30)
-                .open()
-                .map_err(err)?;
+            let db = Database::builder(scratch).open().map_err(err)?;
             let ks = |name: &str| {
                 db.keyspace(name, KeyspaceCreateOptions::default)
                     .map_err(err)
             };
-            let t = StateTree {
-                live: ks("live")?,
-                tree: ks("tree")?,
-            };
-            let (meta, pending) = (ks("meta")?, ks("records")?);
-            Ok((db, t, meta, pending))
+            let (notes, done) = (ks("notes")?, ks("done")?);
+            Ok((db, notes, done))
         };
-        // The scratch tree is for this snapshot and this end, at ledger `done`.
+        // Notes are for this snapshot and this end; anything else starts over.
         let mut job = [0u8; 8];
         job[..4].copy_from_slice(&base.to_be_bytes());
         job[4..].copy_from_slice(&to.to_be_bytes());
-        let mut resumed = None;
-        if scratch.exists() {
-            let (db, t, meta, pending) = open()?;
-            let done = meta
-                .get(b"done")
-                .map_err(err)?
-                .and_then(|v| <[u8; 4]>::try_from(&v[..]).ok())
-                .map(u32::from_be_bytes);
-            let same = meta.get(b"job").map_err(err)?.is_some_and(|v| v[..] == job);
-            if let Some(d) = done
-                && same
-                && d >= base
-                && d < to
-                && t.root()? == account_hash(d)?
-            {
-                resumed = Some((db, t, meta, pending, d));
+        let kept = match open() {
+            Ok((db, notes, done)) => {
+                let same = done.get("job").map_err(err)?.is_some_and(|v| v[..] == job);
+                same.then_some((db, notes, done))
             }
-        }
-        let (db, t, meta, pending, mut next) = match resumed {
-            Some((db, t, meta, pending, d)) => (db, t, meta, pending, d + 1),
+            Err(_) => None,
+        };
+        let (db, notes, done) = match kept {
+            Some(kept) => kept,
             None => {
                 let _ = std::fs::remove_dir_all(scratch);
-                let (db, t, meta, pending) = open()?;
-                (db, t, meta, pending, base)
+                let (db, notes, done) = open()?;
+                done.insert("job", job).map_err(err)?;
+                (db, notes, done)
             }
         };
+        let slot_done = |slot: u16| -> Result<bool, String> {
+            Ok(done.get(slot.to_be_bytes()).map_err(err)?.is_some())
+        };
+        let mut todo = Vec::new();
+        for slot in 0..LEVEL_SLOTS as u16 {
+            if !slot_done(slot)? {
+                todo.push(slot);
+            }
+        }
+        if todo.len() < LEVEL_SLOTS {
+            progress(format!(
+                "{} of {LEVEL_SLOTS} subtrees already replayed",
+                LEVEL_SLOTS - todo.len()
+            ));
+        }
+
+        // Pass 1: each subtree on its own. A note is keyed by ledger and
+        // subtree, and holds the subtree's hash and key count after the ledger.
         let snap = self.db.snapshot();
-        // Records wait in the scratch store, in the batch of their ledger, and
-        // move to the tree history in groups; a stop between the two steps
-        // only moves some of them twice.
-        let flush = || -> Result<(), String> {
-            let mut moved = Vec::new();
-            let mut b = self.db.batch();
-            for g in pending.iter() {
-                let (k, v) = g.into_inner().map_err(err)?;
-                b.insert(&self.levels, k.clone(), v);
-                moved.push(k);
-            }
-            if moved.is_empty() {
-                return Ok(());
-            }
-            b.commit().map_err(err)?;
-            self.persist()?;
-            let mut b = db.batch();
-            for k in moved {
-                b.remove(&pending, k);
-            }
-            b.commit().map_err(err)
-        };
-        flush()?;
-        while next < to {
-            // Replays ledgers [next, end): the first window starts with the snapshot.
-            let end = next.saturating_add(window).min(to);
-            let first = next == base;
-            let mut snapshot: Vec<([u8; 32], [u8; 32])> = Vec::new();
+        let next = AtomicUsize::new(0);
+        let replayed = AtomicUsize::new(LEVEL_SLOTS - todo.len());
+        let replay = |slot: u16| -> Result<(), String> {
+            let (lo, hi) = level_range(slot);
+            let mut end = hi.to_vec();
+            end.extend_from_slice(&[0xFF; 4]);
+            let mut tree = SubTree::new(lo, LEVEL_DEPTH);
             let mut changes: Vec<(u32, [u8; 32], Option<[u8; 32]>)> = Vec::new();
-            let mut at_base: Option<([u8; 32], Option<[u8; 32]>)> = None;
-            for g in snap.iter(&self.objects) {
+            for g in snap.range(&self.objects, lo.to_vec()..=end) {
                 let (k, v) = g.into_inner().map_err(err)?;
                 let key: [u8; 32] = k[..32].try_into().map_err(|_| "object key")?;
                 let seq = u32::from_be_bytes(k[32..].try_into().map_err(|_| "object version")?);
-                if first {
-                    if at_base.as_ref().is_some_and(|(ck, _)| *ck != key)
-                        && let Some((ck, Some(h))) = at_base.take()
-                    {
-                        snapshot.push((ck, h));
-                    }
-                    if seq <= base {
-                        at_base = Some((key, state_leaf_hash_of(&v, &key)));
-                    }
+                let leaf = state_leaf_hash_of(&v, &key);
+                if seq <= base {
+                    // Versions of a key come in order: the last one wins.
+                    tree.set(key, leaf);
+                } else if seq < to {
+                    changes.push((seq, key, leaf));
                 }
-                if seq > base && seq >= next && seq < end {
-                    changes.push((seq, key, state_leaf_hash_of(&v, &key)));
-                }
-            }
-            if first {
-                if let Some((ck, Some(h))) = at_base {
-                    snapshot.push((ck, h));
-                }
-                let mut nodes = Vec::new();
-                let root = t.build(&snapshot, |k, v| {
-                    nodes.push((k, v));
-                    Ok(())
-                })?;
-                if root != account_hash(base)? {
-                    return Err(format!(
-                        "objects at the snapshot do not give the state root of ledger {base}"
-                    ));
-                }
-                for chunk in nodes.chunks(50_000) {
-                    let mut b = db.batch();
-                    for (k, v) in chunk {
-                        b.insert(&t.tree, k.clone(), v.clone());
-                    }
-                    b.commit().map_err(err)?;
-                }
-                let mut ing = t.live.start_ingestion().map_err(err)?;
-                for (k, h) in &snapshot {
-                    ing.write(*k, *h).map_err(err)?;
-                }
-                ing.finish().map_err(err)?;
-                let level = t.levels()?;
-                if level.len() != LEVEL_SLOTS {
-                    return Err("the snapshot's tree is too sparse for tree history".into());
-                }
-                let mut b = db.batch();
-                b.insert(&pending, base.to_be_bytes(), encode_levels(&level));
-                b.insert(&meta, "job", job);
-                b.insert(&meta, "done", base.to_be_bytes());
-                b.commit().map_err(err)?;
-                next = base + 1;
             }
             changes.sort_by_key(|c| c.0);
+            let note = |tree: &mut SubTree, seq: u32| {
+                let mut k = [0u8; 6];
+                k[..4].copy_from_slice(&seq.to_be_bytes());
+                k[4..].copy_from_slice(&slot.to_be_bytes());
+                let mut v = [0u8; 36];
+                v[..32].copy_from_slice(&tree.hash());
+                v[32..].copy_from_slice(&(tree.len() as u32).to_be_bytes());
+                (k, v)
+            };
+            let mut b = db.batch();
+            let (k, v) = note(&mut tree, base);
+            b.insert(&notes, k, v);
             let mut i = 0;
-            for seq in next..end {
-                let mut lc = LeafChanges::new();
+            while i < changes.len() {
+                let seq = changes[i].0;
                 while i < changes.len() && changes[i].0 == seq {
-                    lc.insert(changes[i].1, changes[i].2);
+                    tree.set(changes[i].1, changes[i].2);
                     i += 1;
                 }
-                let mut b = db.batch();
-                let (root, level) =
-                    t.update_levels(&lc, &mut b, seq.is_multiple_of(LEVELS_EVERY))?;
-                if root != account_hash(seq)? {
-                    return Err(format!(
-                        "replay does not give the state root of ledger {seq}"
-                    ));
-                }
-                if !level.is_empty() {
-                    b.insert(&pending, seq.to_be_bytes(), encode_levels(&level));
-                }
-                b.insert(&meta, "done", seq.to_be_bytes());
-                b.commit().map_err(err)?;
-                if seq.is_multiple_of(1024) {
-                    flush()?;
-                }
-                if seq.is_multiple_of(4096) {
-                    progress(seq, to);
-                }
+                let (k, v) = note(&mut tree, seq);
+                b.insert(&notes, k, v);
             }
-            flush()?;
-            progress(end, to);
-            next = end;
-        }
+            b.insert(&done, slot.to_be_bytes(), [1]);
+            b.commit().map_err(err)?;
+            let n = replayed.fetch_add(1, Ordering::Relaxed) + 1;
+            if n.is_multiple_of(256) {
+                progress(format!("{n} of {LEVEL_SLOTS} subtrees replayed"));
+            }
+            Ok(())
+        };
+        std::thread::scope(|s| {
+            let workers: Vec<_> = (0..threads.max(1))
+                .map(|_| {
+                    s.spawn(|| -> Result<(), String> {
+                        while let Some(slot) = todo.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            replay(*slot)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            let joined: Vec<_> = workers.into_iter().map(|w| w.join()).collect();
+            joined
+                .into_iter()
+                .try_for_each(|w| w.map_err(|_| "a replay worker panicked".to_string())?)
+        })?;
+        db.persist(PersistMode::SyncAll).map_err(err)?;
+
+        // Pass 2: ledgers in order, the top of the tree checked on each.
+        let mut hashes = vec![[0u8; 32]; LEVEL_SLOTS];
+        let mut counts = vec![0u32; LEVEL_SLOTS];
+        let mut it = notes.iter();
+        let mut pending = None;
         let mut b = self.db.batch();
+        for seq in base..to {
+            let mut level = std::collections::BTreeMap::new();
+            loop {
+                if pending.is_none() {
+                    pending = it.next().map(|g| g.into_inner()).transpose().map_err(err)?;
+                }
+                let Some((k, v)) = pending.take_if(|(k, _)| k[..4] <= seq.to_be_bytes()[..]) else {
+                    break;
+                };
+                let slot = u16::from_be_bytes([k[4], k[5]]);
+                let h: [u8; 32] = v[..32].try_into().map_err(|_| "note")?;
+                hashes[slot as usize] = h;
+                counts[slot as usize] =
+                    u32::from_be_bytes(v[32..36].try_into().map_err(|_| "note")?);
+                level.insert(slot, h);
+            }
+            if seq == base && level.len() != LEVEL_SLOTS {
+                return Err("the snapshot is missing from the notes".into());
+            }
+            let header = Ledger {
+                header: self.header(seq)?.ok_or(format!("no header for {seq}"))?,
+                transactions: Vec::new(),
+                changes: Vec::new(),
+            }
+            .header()?;
+            if root_of_levels(&hashes, &counts) != header.account_hash {
+                return Err(format!(
+                    "replay does not give the state root of ledger {seq}"
+                ));
+            }
+            if seq.is_multiple_of(LEVELS_EVERY) {
+                level = (0..LEVEL_SLOTS as u16)
+                    .map(|s| (s, hashes[s as usize]))
+                    .collect();
+            }
+            if !level.is_empty() {
+                b.insert(&self.levels, seq.to_be_bytes(), encode_levels(&level));
+            }
+            if seq.is_multiple_of(1024) {
+                b.commit().map_err(err)?;
+                b = self.db.batch();
+            }
+            if seq.is_multiple_of(16384) {
+                progress(format!("checked up to ledger {seq} of {to}"));
+            }
+        }
         b.insert(&self.meta, LEVELS_FROM, base.to_be_bytes());
         b.commit().map_err(err)?;
         self.persist()?;
-        drop((t, meta, pending, db));
+        drop((notes, done, db));
         let _ = std::fs::remove_dir_all(scratch);
         Ok(Some((base, to - 1)))
     }
@@ -1815,20 +1811,23 @@ mod tests {
         b.commit().unwrap();
         assert!(s.state_path_at(&key(1), 100).is_err());
         let scratch = dir.path().join("scratch");
-        // Stopped after the second window, it goes on from there.
-        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            s.backfill_levels(&scratch, 50, |done, _| assert_ne!(done, 101))
-        }));
+        // Stopped after a quarter of the subtrees, it goes on from there.
+        let stopped = s.backfill_levels(&scratch, 1, |m| {
+            assert_ne!(m, "1024 of 4096 subtrees replayed")
+        });
         assert!(stopped.is_err());
         assert!(scratch.exists());
         assert_eq!(s.levels_from().unwrap(), Some(256));
-        let seen = std::cell::RefCell::new(Vec::new());
+        let seen = std::sync::Mutex::new(Vec::new());
         assert_eq!(
-            s.backfill_levels(&scratch, 50, |done, _| seen.borrow_mut().push(done))
+            s.backfill_levels(&scratch, 4, |m| seen.lock().unwrap().push(m))
                 .unwrap(),
             Some((1, 255))
         );
-        assert_eq!(seen.into_inner(), [151, 201, 251, 256]);
+        assert_eq!(
+            seen.into_inner().unwrap()[0],
+            "1024 of 4096 subtrees already replayed"
+        );
         assert_eq!(s.levels_from().unwrap(), Some(1));
         assert!(!scratch.exists());
         let rebuilt = records(&s);
@@ -1837,7 +1836,7 @@ mod tests {
             assert_eq!(rebuilt.get(seq), Some(v), "ledger {seq}");
         }
         assert_eq!(rebuilt[&1].len(), LEVEL_SLOTS * 34);
-        assert_eq!(s.backfill_levels(&scratch, 50, |_, _| {}).unwrap(), None);
+        assert_eq!(s.backfill_levels(&scratch, 4, |_| {}).unwrap(), None);
         at.insert(1, snapshot.clone());
         for (seq, st) in &at {
             for i in [0u32, 7, 4321, 6001, 6399, 9999] {

@@ -539,9 +539,7 @@ async fn run(args: Args) -> Result<(), String> {
         let scratch = args.data_dir.join("levels-backfill");
         std::thread::spawn(move || {
             let t = Instant::now();
-            match state.backfill_levels(&scratch, 32768, |done, to| {
-                info!("tree history rebuilt up to ledger {done} of {to}")
-            }) {
+            match state.backfill_levels(&scratch, 8, |m| info!("tree history: {m}")) {
                 Ok(Some((from, to))) => info!(
                     "tree history rebuilt for ledgers {from}..{to} in {:.0} s",
                     t.elapsed().as_secs_f64()
