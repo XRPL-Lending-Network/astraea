@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `proof_entry` at earlier ledgers (`ledger_index` or `ledger_hash`). Each ledger now records the state subtrees at depth 3 it changed (a full set of 4096 every 256 ledgers) in a `levels` keyspace; a path at an earlier ledger is rebuilt from those and the object versions, and must reproduce both the recorded subtree and the header's `AccountHash`. The history starts at the first ledger this version applies.
 - Proofs for all of history. `proof_ledger` and `proof_tx` no longer need an anchor within 512 ledgers: an older target is reached through the long skip list in the latest state, which holds the hash of every 256th ledger since the start of history. The package (`xrpl-witness/evidence/4`) proves that list in the state of the latest tree ledger, anchors that ledger by quorum as before, and adds the headers from the target up to the next multiple of 256. `proof_tx` finds transactions in cold history too. `witness-verify evidence` checks the new `skips` field.
 - `account_tx` over cold history reads only headers and transactions, not state changes, and prepares the blocks a page needs in parallel. In the Clio comparison benchmark p99 for a 200-transaction page went from 4.2 s to 660 ms.
 - Cold segments carry a seal (`cold-F.seal`): each block gets its full check once, when the segment is written, instead of on every load. `astraea-state history-cold-seal` seals older segments. With it, account_tx p99 is 383 ms and 16 clients get 234 requests per second, up from 39.

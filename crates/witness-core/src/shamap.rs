@@ -128,6 +128,40 @@ fn sorted(items: &[(Hash, Hash)]) -> Vec<(Hash, Hash)> {
     v
 }
 
+/// Hash of the subtree at `depth` for sorted leaves that share their first
+/// `depth` nibbles: zeros if empty, the leaf itself if alone, else an inner node.
+pub fn subtree_hash(items: &[(Hash, Hash)], depth: usize) -> Hash {
+    subtree(items, depth)
+}
+
+/// Inner nodes from `depth` down to the slot of `key`, for sorted leaves that
+/// share the key's first `depth` nibbles, and the leaf in that slot: the key's
+/// own, another key's (which proves the key absent), or none.
+pub fn walk_from(
+    items: &[(Hash, Hash)],
+    key: &Hash,
+    depth: usize,
+) -> (Vec<[Hash; 16]>, Option<(Hash, Hash)>) {
+    let mut slice = items;
+    let mut levels = Vec::new();
+    for depth in depth..64 {
+        levels.push(children(slice, depth));
+        let branch = nibble(key, depth);
+        let start = slice.partition_point(|(k, _)| nibble(k, depth) < branch);
+        let len = slice[start..]
+            .iter()
+            .take_while(|(k, _)| nibble(k, depth) == branch)
+            .count();
+        slice = &slice[start..start + len];
+        match slice {
+            [] => return (levels, None),
+            [leaf] => return (levels, Some(*leaf)),
+            _ => {}
+        }
+    }
+    (levels, None)
+}
+
 /// Tree root from leaves (key, leaf hash). An empty tree is zeros.
 pub fn root(items: &[(Hash, Hash)]) -> Hash {
     let v = sorted(items);

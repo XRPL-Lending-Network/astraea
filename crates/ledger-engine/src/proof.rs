@@ -379,22 +379,24 @@ impl Engine {
         )
     }
 
-    /// Bundle for a state object (present or absent) at the latest ledger
-    /// of the state tree. Older ledgers are the next step: that needs
-    /// historical tree nodes.
+    /// Bundle for a state object (present or absent) at the latest ledger of
+    /// the state tree, or at an earlier one from the tree history.
     pub fn proof_entry(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
         let key = self.entry_key_of(p)?;
-        if p.get("ledger_index")
-            .is_some_and(|v| v.as_str() != Some("validated"))
-            || p.contains_key("ledger_hash")
-        {
-            return Err(err(
-                "notImpl",
-                74,
-                "Object proofs are only available for the latest state ledger for now.",
-            ));
-        }
-        let t = self.state.tree_path(&key).map_err(internal)?;
+        let earlier = p
+            .get("ledger_index")
+            .is_some_and(|v| !v.is_null() && v.as_str() != Some("validated"))
+            || p.get("ledger_hash").is_some_and(|v| !v.is_null());
+        let t = if earlier {
+            let seq = self.resolve_state(p)?;
+            self.state
+                .state_path_at(&key, seq)
+                .map_err(|e| err("noEvidence", 5002, e))?
+        } else {
+            let t = self.state.tree_path(&key).map_err(internal)?;
+            self.wait_confirmed(t.ledger)?;
+            t
+        };
         let (object, other) = match &t.leaf {
             Leaf::Present(o) => (Some(&o[..]), None),
             Leaf::Empty => (None, None),
@@ -402,7 +404,6 @@ impl Engine {
         };
         let proof = StateProof::new(&t.header, &key, object, other, &t.path);
         let present = object.is_some();
-        self.wait_confirmed(t.ledger)?;
         let (b, anchor) = self.bundle(t.ledger, Vec::new(), vec![proof])?;
         self.answer(
             b,

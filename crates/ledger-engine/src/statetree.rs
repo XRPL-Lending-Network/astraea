@@ -18,8 +18,11 @@
 //! header's `AccountHash` before writing. If it does not match, the ledger is
 //! rejected. New leaf hashes and nodes go into the same batch as the state changes.
 //!
-//! Only the latest version of the tree is stored: historical paths for
-//! proofs against old ledgers are a separate task.
+//! Only the latest version of the tree is stored. For proofs against earlier
+//! ledgers each update also reports the subtrees at depth `LEVEL_DEPTH` it
+//! changed (4096 of them, about 1700 keys each on mainnet): with those hashes
+//! kept per ledger, the top of the tree at any ledger is a few thousand
+//! hashes, and the subtree below is rebuilt from the object versions.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -29,6 +32,25 @@ use witness_core::shamap::state_leaf_hash;
 
 type Hash = [u8; 32];
 const ZERO: Hash = [0; 32];
+
+/// Depth of the subtrees whose hashes are kept per ledger.
+pub const LEVEL_DEPTH: usize = 3;
+/// How many subtrees there are at that depth.
+pub const LEVEL_SLOTS: usize = 1 << (4 * LEVEL_DEPTH);
+
+/// The subtree at `LEVEL_DEPTH` a key belongs to: its first three nibbles.
+pub fn level_slot(key: &Hash) -> u16 {
+    (u16::from(key[0]) << 4) | u16::from(key[1] >> 4)
+}
+
+/// The key range of a subtree at `LEVEL_DEPTH`.
+pub fn level_range(slot: u16) -> (Hash, Hash) {
+    let mut k = ZERO;
+    k[0] = (slot >> 4) as u8;
+    k[1] = ((slot & 0x0F) as u8) << 4;
+    range_of(&k, LEVEL_DEPTH)
+}
+
 /// SHA-512Half prefix for an inner node: `MIN\0`.
 const INNER_PREFIX: [u8; 4] = [b'M', b'I', b'N', 0];
 
@@ -162,6 +184,8 @@ struct Round<'a> {
     t: &'a StateTree,
     changes: &'a LeafChanges,
     written: HashMap<Vec<u8>, Option<[Hash; 16]>>,
+    /// Recomputed subtrees at `LEVEL_DEPTH`: slot → hash.
+    level: BTreeMap<u16, Hash>,
 }
 
 impl Round<'_> {
@@ -229,6 +253,14 @@ impl Round<'_> {
 
     /// Hash of the subtree under the prefix; `touched` says whether it has changes.
     fn subtree(&mut self, prefix: &Hash, depth: usize, touched: bool) -> Result<Hash, String> {
+        let h = self.subtree_at(prefix, depth, touched)?;
+        if depth == LEVEL_DEPTH && touched {
+            self.level.insert(level_slot(prefix), h);
+        }
+        Ok(h)
+    }
+
+    fn subtree_at(&mut self, prefix: &Hash, depth: usize, touched: bool) -> Result<Hash, String> {
         let nk = node_key(prefix, depth);
         if depth > 0 {
             let (n, single) = self.count(prefix, depth)?;
@@ -273,12 +305,38 @@ impl StateTree {
         changes: &LeafChanges,
         batch: &mut OwnedWriteBatch,
     ) -> Result<Hash, String> {
+        Ok(self.update_levels(changes, batch, false)?.0)
+    }
+
+    /// Like `update`, plus the subtrees at `LEVEL_DEPTH` the changes touched,
+    /// or with `full` all `LEVEL_SLOTS` of them. A full set read from a tree
+    /// so sparse that a node above that depth collapsed into a leaf comes out
+    /// short, and the caller can tell by its length.
+    pub fn update_levels(
+        &self,
+        changes: &LeafChanges,
+        batch: &mut OwnedWriteBatch,
+        full: bool,
+    ) -> Result<(Hash, BTreeMap<u16, Hash>), String> {
         let mut r = Round {
             t: self,
             changes,
             written: HashMap::new(),
+            level: BTreeMap::new(),
         };
         let root = r.subtree(&ZERO, 0, !changes.is_empty())?;
+        let mut level = std::mem::take(&mut r.level);
+        if full {
+            for top in 0..=u8::MAX {
+                let mut prefix = ZERO;
+                prefix[0] = top;
+                if let Some(children) = r.node(&node_key(&prefix, LEVEL_DEPTH - 1))? {
+                    for (c, h) in children.iter().enumerate() {
+                        level.insert((u16::from(top) << 4) | c as u16, *h);
+                    }
+                }
+            }
+        }
         for (k, v) in r.written {
             match v {
                 Some(children) => batch.insert(&self.tree, k, encode_node(&children)),
@@ -291,7 +349,7 @@ impl StateTree {
                 None => batch.remove(&self.live, *k),
             }
         }
-        Ok(root)
+        Ok((root, level))
     }
 
     /// Current root, without changes.

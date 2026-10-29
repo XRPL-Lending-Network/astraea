@@ -78,11 +78,11 @@ Nothing else is forwarded, whatever its parameters say. Transaction submission a
 |---|---|---|
 | `proof_ledger` | `ledger_index` or `ledger_hash` | the header and its hash were validated by quorum |
 | `proof_tx` | `transaction` (hash) | the transaction with this metadata is in a validated ledger |
-| `proof_entry` | the same selectors as `ledger_entry` | the object exists with this content, or does not exist, in the latest state |
+| `proof_entry` | the same selectors as `ledger_entry`, and `ledger_index` or `ledger_hash` | the object exists with this content, or does not exist, in the state of that ledger (the latest by default) |
 
 The response holds the package under `proof`, the anchor ledger, and two plain lists: what the package proves and what it does not (for example, a transaction proof says nothing about server-derived fields like `delivered_amount`).
 
-`proof_ledger` and `proof_tx` work for any ledger the server holds, back to ledger 32570. A target within 512 ledgers of an anchor is linked to it by a header chain (`target_confirmed_by` is `quorum` or `hash-chain`). An older one is reached through a skip list (`skip-list`, package format `xrpl-witness/evidence/4`): the latest state holds the hash of every 256th ledger since the start of history, so the package proves that list in the state of a recent ledger and adds at most 256 headers from the target up to the ledger in the list. `proof_entry` still works on the latest state only and answers `notImpl` for other ledgers.
+`proof_ledger` and `proof_tx` work for any ledger the server holds, back to ledger 32570. A target within 512 ledgers of an anchor is linked to it by a header chain (`target_confirmed_by` is `quorum` or `hash-chain`). An older one is reached through a skip list (`skip-list`, package format `xrpl-witness/evidence/4`): the latest state holds the hash of every 256th ledger since the start of history, so the package proves that list in the state of a recent ledger and adds at most 256 headers from the target up to the ledger in the list. `proof_entry` works on the latest state and on earlier ledgers from the start of the tree history: the server keeps, per ledger, the hashes of the state subtrees at depth 3 that changed, and rebuilds the path from those and the object versions. For a ledger before that it answers `noEvidence`.
 
 Check a package offline. By default the verifier trusts the same two UNL publishers as xrpld's default configuration; `--publisher <hex key>` replaces them, `--threshold` sets how many lists must include a validator, and `--trust <n9… key>` adds a directly trusted validator.
 

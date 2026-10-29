@@ -24,12 +24,17 @@
 //! The same batch also carries the state tree (module `statetree`): the root after
 //! the ledger's changes is checked against its header's `AccountHash` before writing.
 //! If it does not match, the ledger is rejected and the state stays at the previous one.
+//!
+//! And the tree's history (`levels`): ledger → the subtrees at depth 3 that the
+//! ledger changed, as (slot u16, hash) pairs, all 4096 of them every 256
+//! ledgers. A path at an earlier ledger takes the top of the tree from there
+//! and rebuilds the subtree below from the object versions (`state_path_at`).
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 
 use crate::index::{AccountId, entries};
 use crate::ledger::{Change, Ledger, StateChange};
-use crate::statetree::{StateTree, leaf_changes};
+use crate::statetree::{LEVEL_DEPTH, LEVEL_SLOTS, StateTree, leaf_changes};
 use witness_core::evidence::ValidationEvidence;
 
 const BASE: &[u8] = b"base_ledger";
@@ -38,6 +43,12 @@ const LAST: &[u8] = b"last_ledger";
 const INDEXED: &[u8] = b"indexed_ledger";
 /// Ledger the state tree corresponds to.
 const TREE: &[u8] = b"tree_ledger";
+/// First ledger with a full set of tree levels: paths at earlier ledgers
+/// cannot be rebuilt.
+const LEVELS_FROM: &[u8] = b"levels_from";
+/// A full set of tree levels is written every this many ledgers, so a path
+/// reads at most this many ledgers of them.
+const LEVELS_EVERY: u32 = 256;
 /// Last ledger confirmed by a validator quorum (`confirm`); every ledger
 /// before it is confirmed by the chain of parent hashes.
 const CONFIRMED: &[u8] = b"confirmed_ledger";
@@ -145,6 +156,8 @@ pub struct StateStore {
     /// MPToken key → issuance and account: used to recognize a deleted MPToken.
     mpt_keys: Keyspace,
     tree: StateTree,
+    /// Tree history: ledger → changed subtrees at depth 3.
+    levels: Keyspace,
     /// Anchor evidence: ledger → quorum validations (JSON).
     evidence: Keyspace,
 }
@@ -197,6 +210,7 @@ impl StateStore {
             tree: ks("tree")?,
         };
         let evidence = ks("evidence")?;
+        let levels = ks("levels")?;
         let (mpt_holders, mpt_keys) = (ks("mpt_holders")?, ks("mpt_keys")?);
         Ok(StateStore {
             db,
@@ -209,6 +223,7 @@ impl StateStore {
             mpt_holders,
             mpt_keys,
             tree,
+            levels,
             evidence,
         })
     }
@@ -409,6 +424,177 @@ impl StateStore {
         Err("path longer than the key".into())
     }
 
+    /// First ledger a path can be rebuilt at (`state_path_at`).
+    pub fn levels_from(&self) -> Result<Option<u32>, String> {
+        self.meta_u32(LEVELS_FROM)
+    }
+
+    /// Path in the state tree to a key as of an earlier ledger `at`. The top
+    /// of the tree comes from the tree history: for each subtree at depth 3,
+    /// the last hash recorded at or before `at`, back to the nearest full set.
+    /// The key's own subtree is rebuilt from the object versions as of `at` and
+    /// must give the recorded hash, and the root must be the header's
+    /// `AccountHash`: a gap or a fault in the history is an error, never a
+    /// wrong path.
+    pub fn state_path_at(&self, key: &[u8; 32], at: u32) -> Result<TreePath, String> {
+        use crate::statetree::{inner_hash, level_range, level_slot};
+        use fjall::Readable as _;
+        use std::ops::Bound;
+        use witness_core::shamap::{state_leaf_hash, subtree_hash, walk_from};
+        let snap = self.db.snapshot();
+        let u32_of = |v: Option<fjall::UserValue>| {
+            v.and_then(|v| <[u8; 4]>::try_from(&v[..]).ok())
+                .map(u32::from_be_bytes)
+        };
+        let from = u32_of(snap.get(&self.meta, LEVELS_FROM).map_err(err)?);
+        let tree = u32_of(snap.get(&self.meta, TREE).map_err(err)?);
+        match (from, tree) {
+            (Some(f), Some(t)) if f <= at && at <= t => {}
+            (Some(f), _) if at < f => {
+                return Err(format!(
+                    "state paths start at ledger {f}: the tree history begins there"
+                ));
+            }
+            _ => return Err(format!("no tree history for ledger {at}")),
+        }
+        let header = snap
+            .get(&self.meta, header_key(at))
+            .map_err(err)?
+            .ok_or("no header for the ledger")?
+            .to_vec();
+        let want = Ledger {
+            header: header.clone(),
+            transactions: Vec::new(),
+            changes: Vec::new(),
+        }
+        .header()?
+        .account_hash;
+
+        // The subtrees at depth 3 as of `at`.
+        let mut slots: Vec<Option<[u8; 32]>> = vec![None; LEVEL_SLOTS];
+        let mut missing = LEVEL_SLOTS;
+        for g in snap.range(&self.levels, ..=at.to_be_bytes()).rev() {
+            let (_, v) = g.into_inner().map_err(err)?;
+            for e in v.as_chunks::<34>().0 {
+                let slot = usize::from(u16::from_be_bytes([e[0], e[1]]));
+                if slots[slot].is_none() {
+                    slots[slot] = Some(e[2..].try_into().map_err(|_| "level hash")?);
+                    missing -= 1;
+                }
+            }
+            if missing == 0 || v.len() == LEVEL_SLOTS * 34 {
+                break;
+            }
+        }
+        if missing > 0 {
+            return Err(format!("tree history has a gap before ledger {at}"));
+        }
+        let slots: Vec<[u8; 32]> = slots.into_iter().flatten().collect();
+        // 256 nodes at depth 2, 16 at depth 1, the root.
+        let nodes2 = slots.as_chunks::<16>().0;
+        let hashes2: Vec<[u8; 32]> = nodes2.iter().map(inner_hash).collect();
+        let nodes1 = hashes2.as_chunks::<16>().0;
+        let hashes1: Vec<[u8; 32]> = nodes1.iter().map(inner_hash).collect();
+        let root: [[u8; 32]; 16] = hashes1.try_into().map_err(|_| "tree top")?;
+        if inner_hash(&root) != want {
+            return Err(format!(
+                "tree history does not give the state root of ledger {at}"
+            ));
+        }
+
+        // The key's subtree, from the object versions as of `at`. Versions are
+        // read in order; a key with many of them (LedgerHashes and busy
+        // accounts change almost every ledger) costs two seeks instead: its
+        // version as of `at`, and the next key.
+        const SEEK_AFTER: usize = 32;
+        let slot = level_slot(key);
+        let (lo, hi) = level_range(slot);
+        let end = Bound::Included(version_key(&hi, u32::MAX));
+        let mut leaves = Vec::new();
+        let mut objects = std::collections::HashMap::new();
+        let mut keep = |k: [u8; 32], v: &[u8]| {
+            if !v.is_empty() {
+                leaves.push((k, state_leaf_hash(v, &k)));
+                objects.insert(k, v.to_vec());
+            }
+        };
+        let mut from = Bound::Included(version_key(&lo, 0));
+        'scan: loop {
+            // The key being read, its version as of `at` so far, versions seen.
+            let mut cur: Option<([u8; 32], Option<fjall::UserValue>, usize)> = None;
+            for g in snap.range(&self.objects, (from, end)) {
+                let (k, v) = g.into_inner().map_err(err)?;
+                let (k, seq): ([u8; 32], [u8; 4]) = (
+                    k[..32].try_into().map_err(|_| "object key")?,
+                    k[32..].try_into().map_err(|_| "object version")?,
+                );
+                let seq = u32::from_be_bytes(seq);
+                match &mut cur {
+                    Some((ck, best, n)) if *ck == k => {
+                        *n += 1;
+                        if seq <= at {
+                            *best = Some(v);
+                        }
+                        if *n >= SEEK_AFTER {
+                            if let Some(g) = snap
+                                .range(&self.objects, version_key(&k, 0)..=version_key(&k, at))
+                                .next_back()
+                            {
+                                keep(k, &g.into_inner().map_err(err)?.1);
+                            }
+                            from = Bound::Excluded(version_key(&k, u32::MAX));
+                            continue 'scan;
+                        }
+                    }
+                    _ => {
+                        if let Some((ck, Some(b), _)) = cur.take() {
+                            keep(ck, &b);
+                        }
+                        cur = Some((k, (seq <= at).then_some(v), 1));
+                    }
+                }
+            }
+            if let Some((ck, Some(b), _)) = cur {
+                keep(ck, &b);
+            }
+            break;
+        }
+        if subtree_hash(&leaves, LEVEL_DEPTH) != slots[usize::from(slot)] {
+            return Err(format!(
+                "objects as of ledger {at} do not give the recorded subtree"
+            ));
+        }
+        let n1 = usize::from(key[0] >> 4);
+        let n0 = usize::from(key[0]);
+        let mut levels = vec![root, nodes1[n1], nodes2[n0]];
+        let leaf = match leaves.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            _ => {
+                let (below, leaf) = walk_from(&leaves, key, LEVEL_DEPTH);
+                levels.extend(below);
+                leaf
+            }
+        };
+        let leaf = match leaf {
+            None => Leaf::Empty,
+            Some((k, _)) => {
+                let object = objects.remove(&k).ok_or("leaf object")?;
+                if k == *key {
+                    Leaf::Present(object)
+                } else {
+                    Leaf::Other(k, object)
+                }
+            }
+        };
+        Ok(TreePath {
+            ledger: at,
+            header,
+            path: witness_core::shamap::Path { levels },
+            leaf,
+        })
+    }
+
     /// Last ledger confirmed by a quorum; `None` if none yet.
     pub fn confirmed(&self) -> Result<Option<u32>, String> {
         self.meta_u32(CONFIRMED)
@@ -557,6 +743,7 @@ impl StateStore {
             ("tx", &self.tx),
             ("ledger_hash", &self.ledger_hash),
             ("account_tx", &self.account_tx),
+            ("levels", &self.levels),
         ]
         .into_iter()
         .map(|(n, k)| (n, k.disk_space(), k.approximate_len()))
@@ -659,7 +846,11 @@ impl StateStore {
         // State root is checked before writing: if it does not match, the ledger is rejected.
         let tree_current = self.tree_ledger()? == Some(sequence - 1);
         if tree_current {
-            let root = self.tree.update(&leaf_changes(changes), &mut b)?;
+            let levels_from = self.levels_from()?;
+            let full = levels_from.is_none() || sequence.is_multiple_of(LEVELS_EVERY);
+            let (root, level) = self
+                .tree
+                .update_levels(&leaf_changes(changes), &mut b, full)?;
             let want = ledger.header()?.account_hash;
             if root != want {
                 return Err(format!(
@@ -669,6 +860,17 @@ impl StateStore {
                 ));
             }
             b.insert(&self.meta, TREE, sequence.to_be_bytes());
+            if !level.is_empty() {
+                let mut v = Vec::with_capacity(level.len() * 34);
+                for (slot, h) in &level {
+                    v.extend_from_slice(&slot.to_be_bytes());
+                    v.extend_from_slice(h);
+                }
+                b.insert(&self.levels, sequence.to_be_bytes(), v);
+            }
+            if levels_from.is_none() && level.len() == LEVEL_SLOTS {
+                b.insert(&self.meta, LEVELS_FROM, sequence.to_be_bytes());
+            }
         }
         for c in changes {
             let value: &[u8] = match c.change {
@@ -1307,6 +1509,97 @@ mod tests {
             !proof(near).present,
             "neighbouring key under the same prefix"
         );
+    }
+
+    #[test]
+    fn paths_at_earlier_ledgers_from_the_tree_history() {
+        use std::collections::BTreeMap;
+        use witness_core::sha512_half;
+        use witness_core::shamap::{root, state_leaf_hash};
+        use witness_core::stateproof::StateProof;
+        let dir = tempfile::tempdir().unwrap();
+        let s = StateStore::open(dir.path()).unwrap();
+        // Dense enough that every node above depth 3 is an inner node, as on
+        // mainnet; the subtrees at depth 3 hold zero, one or a few keys.
+        let key = |i: u32| sha512_half(&i.to_be_bytes());
+        let mut state: BTreeMap<[u8; 32], Vec<u8>> =
+            (0..6000u32).map(|i| (key(i), vec![i as u8, 1])).collect();
+        let hdr = |seq: u32, st: &BTreeMap<[u8; 32], Vec<u8>>| {
+            let leaves: Vec<_> = st
+                .iter()
+                .map(|(k, v)| (*k, state_leaf_hash(v, k)))
+                .collect();
+            header_with(seq, root(&leaves))
+        };
+        s.load_snapshot(1, &hdr(1, &state), state.clone().into_iter().map(Ok))
+            .unwrap();
+        s.build_tree().unwrap();
+        let mut at = BTreeMap::new();
+        for seq in 2..=300u32 {
+            let mut changes = Vec::new();
+            for j in 0..12u32 {
+                let i = (seq * 131 + j * 977) % 6400;
+                let (k, change) = match (state.contains_key(&key(i)), (seq + j) % 5) {
+                    (true, 0) => (key(i), Change::Deleted),
+                    (true, _) => (key(i), Change::Modified),
+                    (false, _) => (key(i), Change::Created),
+                };
+                if changes.iter().any(|c: &StateChange| c.key == k) {
+                    continue;
+                }
+                let data = vec![i as u8, seq as u8, 2];
+                match change {
+                    Change::Deleted => state.remove(&k),
+                    _ => state.insert(k, data.clone()),
+                };
+                changes.push(StateChange {
+                    key: k,
+                    change,
+                    data: if change == Change::Deleted {
+                        Vec::new()
+                    } else {
+                        data
+                    },
+                });
+            }
+            let l = Ledger {
+                header: hdr(seq, &state),
+                transactions: Vec::new(),
+                changes,
+            };
+            s.apply_ledger(seq, &l, b"").unwrap();
+            if [2, 3, 100, 255, 256, 257, 300].contains(&seq) {
+                at.insert(seq, state.clone());
+            }
+        }
+        assert_eq!(s.levels_from().unwrap(), Some(2));
+        assert!(
+            s.state_path_at(&key(1), 1)
+                .unwrap_err()
+                .contains("start at ledger 2")
+        );
+        for (seq, st) in &at {
+            for i in [0u32, 7, 4321, 6001, 6399, 9999] {
+                let k = key(i);
+                let t = s.state_path_at(&k, *seq).unwrap();
+                let (object, other) = match &t.leaf {
+                    Leaf::Present(o) => (Some(o.clone()), None),
+                    Leaf::Empty => (None, None),
+                    Leaf::Other(ok, o) => (None, Some((*ok, o.clone()))),
+                };
+                let p = StateProof::new(
+                    &t.header,
+                    &k,
+                    object.as_deref(),
+                    other.as_ref().map(|(k, o)| (k, &o[..])),
+                    &t.path,
+                )
+                .verify()
+                .unwrap_or_else(|e| panic!("ledger {seq}, key {i}: {e}"));
+                assert_eq!(p.ledger_index, *seq);
+                assert_eq!(object.as_ref(), st.get(&k), "ledger {seq}, key {i}");
+            }
+        }
     }
 
     #[test]
