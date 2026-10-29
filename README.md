@@ -4,7 +4,7 @@
 
 Astraea is a history server for the XRP Ledger. It speaks the same JSON-RPC and WebSocket API as [Clio](https://github.com/XRPLF/clio), so an existing client can point at it without changes. It stores the whole public history, back to ledger 32571, in a compact format of its own. It can also hand you a package of evidence for any ledger, transaction or state object, which you can check on your own machine without trusting Astraea or any node.
 
-The project is at version 0.1. Its answers have been compared with Clio on recorded production traffic, request by request, and loading the full history is in progress. Expect rough edges in the docs and tooling more than in the data path.
+The project is at version 0.2: proofs now reach all of history. Its answers have been compared with Clio on recorded production traffic, request by request, and loading the full history is in progress. Expect rough edges in the docs and tooling more than in the data path.
 
 ## Why another history server
 
@@ -80,7 +80,7 @@ Running a node of your own is covered in [docs/running.md](docs/running.md). The
 
 ## Status and plans
 
-Version 0.1 covers what a Clio replacement needs plus proofs. What comes next is in [ROADMAP.md](ROADMAP.md).
+Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extends proofs to all of history. What comes next is in [ROADMAP.md](ROADMAP.md).
 
 ### Full history load, as of 29 October 2026
 
