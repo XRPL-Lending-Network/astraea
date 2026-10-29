@@ -58,7 +58,7 @@ astraea-ingest \
 | `--forward-rpc` | node JSON-RPC endpoints for forwarded methods; without them those methods return `unknownCmd` |
 | `--forward-timeout` | per-node timeout for forwarding, seconds (default 5) |
 | `--network-id` | network ID for CTIDs, 0 for mainnet |
-| `--metrics-addr` | Prometheus metrics |
+| `--metrics-addr` | Prometheus metrics, described in [metrics.md](metrics.md) |
 
 Before the first start, take a snapshot of the full ledger state with `astraea-snapshot` (it downloads every object over gRPC and refuses the result unless the rebuilt state tree matches the header's `account_hash`) and load it with `astraea-state --db <data-dir>/state load <snapshot>`. From then on `astraea-ingest` follows the network. History before the snapshot comes from the cold store.
 

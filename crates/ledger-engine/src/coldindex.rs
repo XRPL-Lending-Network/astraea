@@ -154,6 +154,8 @@ pub struct ColdIndex {
     lgr: fs::File,
     /// Hash of every `LGR_SPARSE`-th `.lgr` record.
     lgr_sparse: Vec<[u8; 32]>,
+    /// Bytes of its files, from the manifest.
+    bytes: u64,
 }
 
 impl ColdIndex {
@@ -189,6 +191,9 @@ impl ColdIndex {
             let h = pread(&lgr, 10 + k as u64 * 36, 32)?;
             lgr_sparse.push(h.try_into().map_err(|_| corrupt("ledger hashes"))?);
         }
+        let bytes = m["files"]
+            .as_object()
+            .map_or(0, |f| f.values().filter_map(|v| v["bytes"].as_u64()).sum());
         Ok(ColdIndex {
             first,
             last,
@@ -196,6 +201,7 @@ impl ColdIndex {
             acc,
             lgr,
             lgr_sparse,
+            bytes,
         })
     }
 
@@ -272,6 +278,11 @@ impl ColdIndexes {
 
     pub fn parts(&self) -> usize {
         self.parts.len()
+    }
+
+    /// Bytes of all partitions on disk.
+    pub fn bytes(&self) -> u64 {
+        self.parts.iter().map(|p| p.bytes).sum()
     }
 
     /// First ledger of the contiguous indexed history that reaches

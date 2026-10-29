@@ -155,6 +155,11 @@ fn encode_node(children: &[Hash; 16]) -> Vec<u8> {
 /// Leaf changes for a ledger: key → new leaf hash, `None` if deleted.
 pub type LeafChanges = BTreeMap<Hash, Option<Hash>>;
 
+/// Leaf hash of an object version; `None` for a deletion (an empty version).
+pub fn state_leaf_hash_of(data: &[u8], key: &Hash) -> Option<Hash> {
+    (!data.is_empty()).then(|| state_leaf_hash(data, key))
+}
+
 /// Leaf hashes from state changes.
 pub fn leaf_changes(changes: &[crate::ledger::StateChange]) -> LeafChanges {
     changes
@@ -350,6 +355,27 @@ impl StateTree {
             }
         }
         Ok((root, level))
+    }
+
+    /// All subtrees at `LEVEL_DEPTH` as the tree stands; short if a node above
+    /// that depth collapsed into a leaf, as in `update_levels`.
+    pub fn levels(&self) -> Result<BTreeMap<u16, Hash>, String> {
+        let mut level = BTreeMap::new();
+        for top in 0..=u8::MAX {
+            let mut prefix = ZERO;
+            prefix[0] = top;
+            if let Some(children) = self
+                .tree
+                .get(node_key(&prefix, LEVEL_DEPTH - 1))
+                .map_err(err)?
+                .and_then(|v| decode_node(&v))
+            {
+                for (c, h) in children.iter().enumerate() {
+                    level.insert((u16::from(top) << 4) | c as u16, *h);
+                }
+            }
+        }
+        Ok(level)
     }
 
     /// Current root, without changes.

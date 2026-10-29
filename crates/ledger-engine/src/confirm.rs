@@ -176,6 +176,30 @@ impl Confirmer {
         }
     }
 
+    /// Each configured publisher's latest list: publisher, sequence, number of
+    /// validators, expiration (seconds since the XRPL epoch).
+    pub fn latest_lists(&self) -> Vec<(Key, u64, usize, Option<u32>)> {
+        let mut g = self.lock();
+        self.refresh_lists(&mut g);
+        let mut latest: BTreeMap<Key, (u64, usize, Option<u32>)> = BTreeMap::new();
+        for s in &g.lists.seen {
+            let l = &s.list;
+            if latest
+                .get(&l.publisher)
+                .is_none_or(|(seq, _, _)| *seq < l.sequence)
+            {
+                latest.insert(
+                    l.publisher.clone(),
+                    (l.sequence, l.validators.len(), l.expiration),
+                );
+            }
+        }
+        latest
+            .into_iter()
+            .map(|(p, (seq, n, exp))| (p, seq, n, exp))
+            .collect()
+    }
+
     pub fn stats(&self) -> (bool, u64, u64, u64) {
         let g = self.lock();
         (

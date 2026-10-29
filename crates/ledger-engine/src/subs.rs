@@ -60,6 +60,19 @@ struct Sub {
 pub struct Hub {
     subs: Mutex<HashMap<u64, Sub>>,
     next: AtomicU64,
+    /// Sessions disconnected for falling behind.
+    dropped: AtomicU64,
+}
+
+/// Subscriptions right now, for metrics.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct HubStats {
+    pub ledger: u64,
+    pub transactions: u64,
+    /// Sessions subscribed to at least one account, and accounts over all of them.
+    pub account_sessions: u64,
+    pub accounts: u64,
+    pub dropped: u64,
 }
 
 /// What subscribe or unsubscribe asks for.
@@ -151,6 +164,21 @@ impl Hub {
         self.lock().remove(&id);
     }
 
+    pub fn stats(&self) -> HubStats {
+        let g = self.lock();
+        let mut st = HubStats {
+            dropped: self.dropped.load(Ordering::Relaxed),
+            ..HubStats::default()
+        };
+        for s in g.values() {
+            st.ledger += u64::from(s.ledger);
+            st.transactions += u64::from(s.transactions);
+            st.account_sessions += u64::from(!s.accounts.is_empty());
+            st.accounts += s.accounts.len() as u64;
+        }
+        st
+    }
+
     /// `top` is the ledger the subscribe response will report.
     pub fn subscribe(&self, id: u64, r: &Request, api: u32, top: u32) {
         if let Some(s) = self.lock().get_mut(&id) {
@@ -199,6 +227,7 @@ impl Hub {
             }
         }
         for id in dead {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             warn!("subscriptions: session {id} can't keep up reading, disconnected");
             self.leave(id);
         }
@@ -522,11 +551,20 @@ mod tests {
         };
         hub.subscribe(a, &r, 1, 0);
         assert!(hub.wants_anything());
+        let st = hub.stats();
+        assert_eq!((st.ledger, st.transactions, st.dropped), (1, 0, 0));
         hub.deliver(&[(a, "x".into())]);
         assert_eq!(rx.try_recv().unwrap(), "x");
         let flood: Vec<(u64, String)> = (0..=QUEUE).map(|_| (a, "y".into())).collect();
         hub.deliver(&flood);
         assert!(!hub.wants_anything());
+        assert_eq!(
+            hub.stats(),
+            HubStats {
+                dropped: 1,
+                ..HubStats::default()
+            }
+        );
         hub.unsubscribe(a, &r);
     }
 }

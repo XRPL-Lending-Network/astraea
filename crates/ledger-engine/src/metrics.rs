@@ -1,5 +1,11 @@
 //! Loader metrics in Prometheus format, for any Prometheus-compatible scraper.
 //!
+//! Beyond what a history server usually reports (requests, latency, load
+//! progress), these say how far the data can be trusted: how many validators
+//! signed the last confirmed ledger and how many were needed, which UNL lists
+//! are in effect and when they expire, how proofs were built, and what part of
+//! history is served, with state, and with tree history for state proofs.
+//!
 //! The HTTP side is minimal, like the archiver's: one path `/metrics`, no
 //! keep-alive, the whole response at once. If the address is not up yet (the
 //! tunnel starts later), the metrics server keeps retrying while loading goes on.
@@ -48,7 +54,51 @@ pub struct Metrics {
     pub manifests: u64,
     /// Last ledger with stored anchor evidence.
     pub evidence_ledger: u32,
+    /// The quorum decision for the last confirmed ledger: validators that
+    /// signed it, how many were needed, and the size of the UNL.
+    pub quorum_signers: usize,
+    pub quorum_needed: usize,
+    pub unl_size: usize,
+    /// Each configured publisher's latest list.
+    pub unl_lists: Vec<UnlList>,
+    pub coverage: Coverage,
     pub api: Api,
+}
+
+/// A publisher's latest UNL list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnlList {
+    /// The publisher's master key, the first 16 hex digits.
+    pub publisher: String,
+    pub sequence: u64,
+    pub validators: usize,
+    /// Unix time; 0 if the list has none.
+    pub expiration: u64,
+}
+
+/// What the server holds, refreshed every minute.
+#[derive(Debug, Default)]
+pub struct Coverage {
+    /// Ledgers the API serves.
+    pub first_ledger: u32,
+    pub last_ledger: u32,
+    /// First ledger with state (the snapshot), and first with tree history,
+    /// which `proof_entry` needs.
+    pub state_first_ledger: u32,
+    pub tree_history_first_ledger: u32,
+    pub cold_segments: u64,
+    pub cold_transactions: u64,
+    /// Bytes on disk by part.
+    pub bytes: BTreeMap<&'static str, u64>,
+}
+
+/// Converts XRPL-epoch seconds to Unix time; 0 stays 0.
+pub fn unix_of_ripple(t: u32) -> u64 {
+    if t == 0 {
+        0
+    } else {
+        u64::from(t) + RIPPLE_EPOCH
+    }
 }
 
 /// Upper bounds of the API latency buckets, seconds.
@@ -67,14 +117,41 @@ pub struct Api {
     /// Open WebSocket sessions.
     pub ws_sessions: u64,
     pub ws_sessions_total: u64,
+    /// Requests answered by the node, by method.
+    pub forwarded: BTreeMap<String, u64>,
+    /// Response bytes by method.
+    pub response_bytes: BTreeMap<String, u64>,
+    /// Proof bundles built, by (method, how the target was confirmed).
+    pub proofs: BTreeMap<(String, String), u64>,
+    pub proof_cache_hits: u64,
+    /// Requests being served now, regular and proofs.
+    pub inflight: u64,
+    pub inflight_proofs: u64,
+    /// Sessions subscribed to each stream, and accounts subscribed in all.
+    pub subscribers: BTreeMap<&'static str, u64>,
+    pub subscribed_accounts: u64,
+    /// Sessions disconnected for not reading their messages.
+    pub ws_dropped: u64,
 }
 
 impl Api {
-    pub fn record(&mut self, transport: &'static str, method: &str, status: &str, seconds: f64) {
+    pub fn record(
+        &mut self,
+        transport: &'static str,
+        method: &str,
+        status: &str,
+        seconds: f64,
+        bytes: usize,
+        forwarded: bool,
+    ) {
         *self
             .requests
             .entry((transport, method.to_owned(), status.to_owned()))
             .or_default() += 1;
+        *self.response_bytes.entry(method.to_owned()).or_default() += bytes as u64;
+        if forwarded {
+            *self.forwarded.entry(method.to_owned()).or_default() += 1;
+        }
         let (buckets, count, sum) = self.latency.entry(method.to_owned()).or_default();
         if let Some(i) = LATENCY_BUCKETS.iter().position(|&b| seconds <= b) {
             buckets[i] += 1;
@@ -125,6 +202,230 @@ impl Api {
              # TYPE astraea_api_ws_sessions_total counter\n\
              astraea_api_ws_sessions_total {}",
             self.ws_sessions, self.ws_sessions_total
+        );
+        family(
+            out,
+            "astraea_api_forwarded_total",
+            "counter",
+            "Requests answered by the node rather than from our own data, by method.",
+            self.forwarded
+                .iter()
+                .map(|(m, n)| (format!("method=\"{m}\""), n.to_string())),
+        );
+        family(
+            out,
+            "astraea_api_response_bytes_total",
+            "counter",
+            "Bytes of API responses, by method.",
+            self.response_bytes
+                .iter()
+                .map(|(m, n)| (format!("method=\"{m}\""), n.to_string())),
+        );
+        family(
+            out,
+            "astraea_proof_bundles_total",
+            "counter",
+            "Evidence bundles built, by method and how the target ledger was confirmed (quorum, hash-chain, skip-list).",
+            self.proofs.iter().map(|((m, by), n)| {
+                (
+                    format!("method=\"{m}\",confirmed_by=\"{by}\""),
+                    n.to_string(),
+                )
+            }),
+        );
+        family(
+            out,
+            "astraea_proof_cache_hits_total",
+            "counter",
+            "Evidence bundles served from the cache of bundles that never change.",
+            [(String::new(), self.proof_cache_hits.to_string())],
+        );
+        family(
+            out,
+            "astraea_api_inflight",
+            "gauge",
+            "Requests being served now, by pool: regular requests and proof bundles.",
+            [
+                ("pool=\"api\"".to_owned(), self.inflight.to_string()),
+                (
+                    "pool=\"proof\"".to_owned(),
+                    self.inflight_proofs.to_string(),
+                ),
+            ],
+        );
+        family(
+            out,
+            "astraea_api_subscribers",
+            "gauge",
+            "WebSocket sessions subscribed to each stream.",
+            self.subscribers
+                .iter()
+                .map(|(s, n)| (format!("stream=\"{s}\""), n.to_string())),
+        );
+        family(
+            out,
+            "astraea_api_subscribed_accounts",
+            "gauge",
+            "Accounts subscribed to, over all sessions.",
+            [(String::new(), self.subscribed_accounts.to_string())],
+        );
+        family(
+            out,
+            "astraea_api_ws_dropped_total",
+            "counter",
+            "WebSocket sessions disconnected for not reading their messages.",
+            [(String::new(), self.ws_dropped.to_string())],
+        );
+    }
+}
+
+/// One metric family: HELP, TYPE, and a sample per label set (empty labels
+/// for a single sample).
+fn family(
+    out: &mut String,
+    name: &str,
+    kind: &str,
+    help: &str,
+    samples: impl IntoIterator<Item = (String, String)>,
+) {
+    let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} {kind}");
+    for (labels, value) in samples {
+        if labels.is_empty() {
+            let _ = writeln!(out, "{name} {value}");
+        } else {
+            let _ = writeln!(out, "{name}{{{labels}}} {value}");
+        }
+    }
+}
+
+/// The standard process metrics, from `/proc/self`; nothing where there is no
+/// `/proc`.
+fn process(out: &mut String) {
+    // Clock ticks per second: 100 on every Linux the server runs on.
+    const TICKS: f64 = 100.0;
+    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
+        return;
+    };
+    // Fields after the command name, which is in parentheses and may hold spaces.
+    let Some(rest) = stat.rfind(')').map(|i| &stat[i + 2..]) else {
+        return;
+    };
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let num = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    // Indexes from field 3 (state): utime 14, stime 15, threads 20, starttime 22.
+    let cpu = (num(11) + num(12)) / TICKS;
+    let boot = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("btime ")?.trim().parse::<f64>().ok())
+        })
+        .unwrap_or(0.0);
+    let rss = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines().find_map(|l| {
+                l.strip_prefix("VmRSS:")?
+                    .trim()
+                    .trim_end_matches(" kB")
+                    .parse::<u64>()
+                    .ok()
+            })
+        })
+        .unwrap_or(0)
+        * 1024;
+    let fds = std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count());
+    let one = |v: String| [(String::new(), v)];
+    family(
+        out,
+        "process_cpu_seconds_total",
+        "counter",
+        "User and system CPU time.",
+        one(format!("{cpu:.2}")),
+    );
+    family(
+        out,
+        "process_resident_memory_bytes",
+        "gauge",
+        "Resident memory.",
+        one(rss.to_string()),
+    );
+    family(
+        out,
+        "process_open_fds",
+        "gauge",
+        "Open file descriptors.",
+        one(fds.to_string()),
+    );
+    family(
+        out,
+        "process_threads",
+        "gauge",
+        "Threads.",
+        one(format!("{}", num(17))),
+    );
+    family(
+        out,
+        "process_start_time_seconds",
+        "gauge",
+        "Start time, Unix time.",
+        one(format!("{:.0}", boot + num(19) / TICKS)),
+    );
+}
+
+impl Coverage {
+    fn render(&self, out: &mut String) {
+        let one = |v: String| [(String::new(), v)];
+        family(
+            out,
+            "astraea_history_first_ledger",
+            "gauge",
+            "First ledger the API serves.",
+            one(self.first_ledger.to_string()),
+        );
+        family(
+            out,
+            "astraea_history_last_ledger",
+            "gauge",
+            "Last ledger the API serves.",
+            one(self.last_ledger.to_string()),
+        );
+        family(
+            out,
+            "astraea_state_first_ledger",
+            "gauge",
+            "First ledger with state (the snapshot): state methods start here.",
+            one(self.state_first_ledger.to_string()),
+        );
+        family(
+            out,
+            "astraea_tree_history_first_ledger",
+            "gauge",
+            "First ledger with tree history: proof_entry starts here.",
+            one(self.tree_history_first_ledger.to_string()),
+        );
+        family(
+            out,
+            "astraea_cold_segments",
+            "gauge",
+            "Cold history segments.",
+            one(self.cold_segments.to_string()),
+        );
+        family(
+            out,
+            "astraea_cold_transactions",
+            "gauge",
+            "Transactions in cold history.",
+            one(self.cold_transactions.to_string()),
+        );
+        family(
+            out,
+            "astraea_storage_bytes",
+            "gauge",
+            "Bytes on disk by part: the state store (its indexes and tree history are in it, and also shown on their own), hot history, cold segments, cold indexes.",
+            self.bytes
+                .iter()
+                .map(|(p, n)| (format!("part=\"{p}\""), n.to_string())),
         );
     }
 }
@@ -276,7 +577,57 @@ impl Metrics {
             "Size of the state store on disk.",
             self.state_bytes.to_string(),
         );
+        let one = |v: usize| [(String::new(), v.to_string())];
+        family(
+            &mut out,
+            "astraea_quorum_signers",
+            "gauge",
+            "UNL validators that signed the last confirmed ledger.",
+            one(self.quorum_signers),
+        );
+        family(
+            &mut out,
+            "astraea_quorum_needed",
+            "gauge",
+            "Signatures the quorum rule needed for the last confirmed ledger.",
+            one(self.quorum_needed),
+        );
+        family(
+            &mut out,
+            "astraea_unl_size",
+            "gauge",
+            "Validators in the UNL the last confirmation was decided with.",
+            one(self.unl_size),
+        );
+        let lists = |f: fn(&UnlList) -> String| {
+            self.unl_lists
+                .iter()
+                .map(move |l| (format!("publisher=\"{}\"", l.publisher), f(l)))
+        };
+        family(
+            &mut out,
+            "astraea_unl_list_sequence",
+            "gauge",
+            "Sequence of the publisher's latest UNL list.",
+            lists(|l| l.sequence.to_string()),
+        );
+        family(
+            &mut out,
+            "astraea_unl_list_validators",
+            "gauge",
+            "Validators in the publisher's latest UNL list.",
+            lists(|l| l.validators.to_string()),
+        );
+        family(
+            &mut out,
+            "astraea_unl_list_expiration_timestamp_seconds",
+            "gauge",
+            "When the publisher's latest UNL list expires, Unix time.",
+            lists(|l| l.expiration.to_string()),
+        );
+        self.coverage.render(&mut out);
         self.api.render(&mut out);
+        process(&mut out);
         out
     }
 }
@@ -364,9 +715,13 @@ mod tests {
     #[test]
     fn api_requests_render_as_a_histogram() {
         let mut m = Metrics::default();
-        m.api.record("ws", "account_tx", "success", 0.003);
-        m.api.record("http", "account_tx", "actNotFound", 0.2);
-        m.api.record("ws", "account_tx", "success", 9.0);
+        m.api
+            .record("ws", "account_tx", "success", 0.003, 1000, false);
+        m.api
+            .record("http", "account_tx", "actNotFound", 0.2, 200, false);
+        m.api
+            .record("ws", "account_tx", "success", 9.0, 1000, false);
+        m.api.record("http", "fee", "success", 0.01, 300, true);
         m.api.ws_sessions = 2;
         let text = m.render();
         for line in [
@@ -378,12 +733,62 @@ mod tests {
             "astraea_api_request_duration_seconds_bucket{method=\"account_tx\",le=\"+Inf\"} 3",
             "astraea_api_request_duration_seconds_count{method=\"account_tx\"} 3",
             "astraea_api_ws_sessions 2",
+            "astraea_api_response_bytes_total{method=\"account_tx\"} 2200",
+            "astraea_api_forwarded_total{method=\"fee\"} 1",
         ] {
             assert!(text.contains(&format!("\n{line}\n")), "{line}");
         }
         for line in text.lines().filter(|l| !l.starts_with('#')) {
             let (_, v) = line.rsplit_once(' ').unwrap();
             assert!(v.parse::<f64>().is_ok(), "{line}");
+        }
+    }
+
+    #[test]
+    fn trust_and_coverage_render() {
+        let mut m = Metrics {
+            quorum_signers: 33,
+            quorum_needed: 28,
+            unl_size: 35,
+            unl_lists: vec![UnlList {
+                publisher: "ED2677ABFFD1B33A".into(),
+                sequence: 2026,
+                validators: 35,
+                expiration: unix_of_ripple(1_000),
+            }],
+            ..Metrics::default()
+        };
+        m.coverage.first_ledger = 86_339_141;
+        m.coverage.bytes.insert("cold", 466_000_000_000);
+        m.api
+            .proofs
+            .insert(("proof_tx".into(), "skip-list".into()), 4);
+        m.api.subscribers.insert("ledger", 2);
+        let text = m.render();
+        for line in [
+            "astraea_quorum_signers 33",
+            "astraea_quorum_needed 28",
+            "astraea_unl_list_expiration_timestamp_seconds{publisher=\"ED2677ABFFD1B33A\"} 946685800",
+            "astraea_history_first_ledger 86339141",
+            "astraea_storage_bytes{part=\"cold\"} 466000000000",
+            "astraea_proof_bundles_total{method=\"proof_tx\",confirmed_by=\"skip-list\"} 4",
+            "astraea_api_subscribers{stream=\"ledger\"} 2",
+            "astraea_api_inflight{pool=\"proof\"} 0",
+        ] {
+            assert!(text.contains(&format!("\n{line}\n")), "{line}");
+        }
+        // Every family is declared once, and every sample parses.
+        let mut seen = std::collections::BTreeSet::new();
+        for line in text.lines() {
+            if let Some(rest) = line.strip_prefix("# TYPE ") {
+                assert!(
+                    seen.insert(rest.split(' ').next().unwrap().to_owned()),
+                    "{line}"
+                );
+            } else if !line.starts_with('#') {
+                let (_, v) = line.rsplit_once(' ').unwrap();
+                assert!(v.parse::<f64>().is_ok(), "{line}");
+            }
         }
     }
 

@@ -167,8 +167,15 @@ fn try_confirm(sink: &Sink, confirmer: &Confirmer, metrics: &Shared) -> Result<(
         let hash = LedgerHeader::parse(&header)
             .map_err(|e| e.to_string())?
             .hash();
-        if confirmer.check(seq, &hash).confirmed {
+        let verdict = confirmer.check(seq, &hash);
+        if verdict.confirmed {
             sink.state.set_confirmed(seq)?;
+            {
+                let mut m = lock(metrics);
+                m.quorum_signers = verdict.signers;
+                m.quorum_needed = verdict.quorum;
+                m.unl_size = verdict.unl_size;
+            }
             // Anchor evidence once every 256 ledgers: with it and the header chain
             // we can prove ledgers whose validations are no longer in memory.
             if sink
@@ -197,11 +204,59 @@ fn try_confirm(sink: &Sink, confirmer: &Confirmer, metrics: &Shared) -> Result<(
 
 fn update_validation_stats(confirmer: &Confirmer, metrics: &Shared) {
     let (connected, validations, rejected, manifests) = confirmer.stats();
+    let lists = confirmer
+        .latest_lists()
+        .into_iter()
+        .map(|(p, sequence, validators, exp)| metrics::UnlList {
+            publisher: hex::encode_upper(&p).chars().take(16).collect(),
+            sequence,
+            validators,
+            expiration: exp.map_or(0, metrics::unix_of_ripple),
+        })
+        .collect();
     let mut m = lock(metrics);
+    m.unl_lists = lists;
     m.validations_connected = connected;
     m.validations = validations;
     m.validations_rejected = rejected;
     m.manifests = manifests;
+}
+
+/// The served range, the first ledgers with state and with tree history,
+/// cold history from the segment manifests, and bytes on disk by part.
+fn coverage(engine: &Engine) -> metrics::Coverage {
+    let mut c = metrics::Coverage::default();
+    if let Ok((lo, hi)) = engine.range() {
+        (c.first_ledger, c.last_ledger) = (lo, hi);
+    }
+    c.state_first_ledger = engine.state.base().ok().flatten().unwrap_or(0);
+    c.tree_history_first_ledger = engine.state.levels_from().ok().flatten().unwrap_or(0);
+    let mut seg = 0u64;
+    let files = |m: &serde_json::Value| -> u64 {
+        m["files"]
+            .as_object()
+            .map_or(0, |f| f.values().filter_map(|v| v["bytes"].as_u64()).sum())
+    };
+    for (_, _, m) in engine.blocks.cold_info() {
+        c.cold_segments += 1;
+        c.cold_transactions += m["transactions"].as_u64().unwrap_or(0);
+        seg += files(&m);
+    }
+    c.bytes.insert("cold_segments", seg);
+    c.bytes
+        .insert("cold_indexes", engine.blocks.cold_index().bytes());
+    for (name, disk, _) in engine.state.index_sizes() {
+        c.bytes.insert(
+            match name {
+                "levels" => "tree_history",
+                "tx" => "index_tx",
+                "ledger_hash" => "index_ledger_hash",
+                _ => "index_account_tx",
+            },
+            disk,
+        );
+    }
+    c
 }
 
 fn update_sizes(dir: &Path, metrics: &Shared) {
@@ -446,6 +501,19 @@ async fn run(args: Args) -> Result<(), String> {
             ))
         });
         let engine = Arc::new(engine);
+        // What history and state the server holds, and how much disk each part takes.
+        let (cov, m2) = (engine.clone(), metrics.clone());
+        std::thread::spawn(move || {
+            loop {
+                let mut c = coverage(&cov);
+                let mut m = lock(&m2);
+                c.bytes.insert("state", m.state_bytes);
+                c.bytes.insert("hot_history", m.blocks_bytes);
+                m.coverage = c;
+                drop(m);
+                std::thread::sleep(Duration::from_secs(60));
+            }
+        });
         // New cold files are picked up in the background, more often than the
         // check in `range()`, so requests do not wait for the directory re-read.
         let bg = engine.clone();
@@ -463,6 +531,25 @@ async fn run(args: Args) -> Result<(), String> {
             forwarder,
             metrics.clone(),
         ));
+    }
+    // Tree history below the ledger it started at, rebuilt in the background
+    // from the object versions; until it is done, proof_entry starts there.
+    {
+        let state = sink.state.clone();
+        let scratch = args.data_dir.join("levels-backfill");
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            match state.backfill_levels(&scratch, 32768, |done, to| {
+                info!("tree history rebuilt up to ledger {done} of {to}")
+            }) {
+                Ok(Some((from, to))) => info!(
+                    "tree history rebuilt for ledgers {from}..{to} in {:.0} s",
+                    t.elapsed().as_secs_f64()
+                ),
+                Ok(None) => {}
+                Err(e) => warn!("tree history not rebuilt: {e}"),
+            }
+        });
     }
     if let Some(dir) = &args.import_log {
         let from = sink.next();

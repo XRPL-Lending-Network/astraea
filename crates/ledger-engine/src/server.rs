@@ -55,16 +55,31 @@ struct Shared {
     metrics: metrics::Shared,
 }
 
-/// Counts a finished request. A method name a client made up would be a new
-/// series each time, so names the server didn't take are counted as `other`.
-fn record(s: &Shared, transport: &'static str, method: &str, status: &str, started: Instant) {
-    let known = !matches!(status, "unknownCmd" | "badSyntax")
+/// Counts a finished request and its response. A method name a client made up
+/// would be a new series each time, so names the server didn't take are
+/// counted as `other`.
+fn record(
+    s: &Shared,
+    transport: &'static str,
+    method: &str,
+    result: &Result<Reply, RpcError>,
+    started: Instant,
+    bytes: usize,
+) {
+    let status = status_of(result);
+    let known = !matches!(status.as_str(), "unknownCmd" | "badSyntax")
         && (1..=40).contains(&method.len())
         && method.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
     let method = if known { method } else { "other" };
-    lock(&s.metrics)
-        .api
-        .record(transport, method, status, started.elapsed().as_secs_f64());
+    let forwarded = matches!(result, Ok(Reply::Forwarded(_)));
+    lock(&s.metrics).api.record(
+        transport,
+        method,
+        &status,
+        started.elapsed().as_secs_f64(),
+        bytes,
+        forwarded,
+    );
 }
 
 /// `success`, or the error name the client sees.
@@ -212,9 +227,11 @@ async fn call_own(
             .iter()
             .find(|(c, _)| c == k)
     {
+        lock(&s.metrics).api.proof_cache_hits += 1;
         return Ok(hit.clone());
     }
     let engine = s.engine.clone();
+    let name = method.clone();
     let result = tokio::task::spawn_blocking(move || engine.handle(&method, &params))
         .await
         .unwrap_or_else(|e| {
@@ -224,6 +241,19 @@ async fn call_own(
                 message: e.to_string(),
             })
         });
+    if is_proof
+        && let Ok(r) = &result
+        && let Some(by) = r
+            .get("guarantee")
+            .and_then(|g| g.get("target_confirmed_by"))
+            .and_then(Value::as_str)
+    {
+        *lock(&s.metrics)
+            .api
+            .proofs
+            .entry((name, by.to_owned()))
+            .or_default() += 1;
+    }
     if let (Some(k), Ok(r)) = (cache_key, &result) {
         let mut c = s.cache.lock().unwrap_or_else(|p| p.into_inner());
         c.push_front((k, r.clone()));
@@ -258,25 +288,28 @@ async fn http_rpc(State(s): State<Shared>, body: String) -> Response {
         }),
         Err(e) => Err(e),
     };
-    record(&s, "http", &method, &status_of(&result), started);
-    let result = match result {
-        Ok(Reply::Own(mut m)) => {
+    let body = match &result {
+        Ok(Reply::Own(m)) => {
+            let mut m = m.clone();
             m.insert("status".into(), json!("success"));
-            m
+            json!({ "result": m, "warnings": warnings() })
         }
-        Ok(Reply::Forwarded(m)) => {
-            return axum::Json(json!({
-                "result": m,
-                "status": "success",
-                "type": "response",
-                "forwarded": true,
-                "warnings": warnings(),
-            }))
-            .into_response();
-        }
-        Err(e) => error_fields(&e, &request),
-    };
-    axum::Json(json!({ "result": result, "warnings": warnings() })).into_response()
+        Ok(Reply::Forwarded(m)) => json!({
+            "result": m,
+            "status": "success",
+            "type": "response",
+            "forwarded": true,
+            "warnings": warnings(),
+        }),
+        Err(e) => json!({ "result": error_fields(e, &request), "warnings": warnings() }),
+    }
+    .to_string();
+    record(&s, "http", &method, &result, started, body.len());
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 async fn ws_upgrade(State(s): State<Shared>, ws: WebSocketUpgrade) -> Response {
@@ -306,7 +339,7 @@ async fn ws_session(s: Shared, mut socket: WebSocket) {
                     Some(Ok(_)) => continue,
                 };
                 let reply = ws_answer(&s, id, &text).await;
-                if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                if socket.send(Message::Text(reply)).await.is_err() {
                     break;
                 }
             }
@@ -360,14 +393,15 @@ async fn subscription(
     .map(Reply::Own)
 }
 
-async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
+async fn ws_answer(s: &Shared, id: u64, text: &str) -> String {
     let started = Instant::now();
     let Ok(Value::Object(request)) = serde_json::from_str::<Value>(text) else {
-        record(s, "ws", "", "badSyntax", started);
         let e = bad_syntax();
         let mut m = error_fields(&e, &json!(text));
         m.insert("warnings".into(), warnings());
-        return Value::Object(m);
+        let body = Value::Object(m).to_string();
+        record(s, "ws", "", &Err(e), started, body.len());
+        return body;
     };
     let method = request
         .get("command")
@@ -384,12 +418,12 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
     } else {
         call(s, method.clone(), params).await
     };
-    record(s, "ws", &method, &status_of(&result), started);
-    let mut m = match result {
+    let mut m = match &result {
         Ok(r) => {
             let mut m = Map::new();
             let forwarded = matches!(r, Reply::Forwarded(_));
-            let (Reply::Own(mut r) | Reply::Forwarded(mut r)) = r;
+            let (Reply::Own(r) | Reply::Forwarded(r)) = r;
+            let mut r = r.clone();
             if forwarded && r.get("status") == Some(&json!("error")) {
                 // A node error stays an error over WebSocket too, as in xrpld: error
                 // fields at the top, otherwise the client would take it for success.
@@ -411,7 +445,7 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
             }
             m
         }
-        Err(e) => error_fields(&e, &Value::Object(request.clone())),
+        Err(e) => error_fields(e, &Value::Object(request.clone())),
     };
     for k in ["id", "api_version"] {
         if let Some(v) = request.get(k).filter(|v| !v.is_null()) {
@@ -420,7 +454,9 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> Value {
     }
     m.insert("type".into(), json!("response"));
     m.insert("warnings".into(), warnings());
-    Value::Object(m)
+    let body = Value::Object(m).to_string();
+    record(s, "ws", &method, &result, started, body.len());
+    body
 }
 
 /// The API routes over one set of subscriptions, which starts publishing here.
@@ -435,9 +471,33 @@ fn app(engine: Arc<Engine>, forwarder: Option<Arc<Forwarder>>, metrics: metrics:
         metrics,
     };
     tokio::spawn(subs::run(shared.engine.clone(), shared.hub.clone()));
+    tokio::spawn(sample(shared.clone()));
     Router::new()
         .route("/", get(ws_upgrade).post(http_rpc))
         .with_state(shared)
+}
+
+/// Every few seconds, what is happening now: requests in progress and
+/// subscriptions.
+async fn sample(s: Shared) {
+    loop {
+        let h = s.hub.stats();
+        {
+            let mut m = lock(&s.metrics);
+            m.api.inflight = (MAX_INFLIGHT - s.inflight.available_permits()) as u64;
+            m.api.inflight_proofs = (MAX_PROOFS - s.proofs.available_permits()) as u64;
+            m.api.subscribers = [
+                ("ledger", h.ledger),
+                ("transactions", h.transactions),
+                ("accounts", h.account_sessions),
+            ]
+            .into_iter()
+            .collect();
+            m.api.subscribed_accounts = h.accounts;
+            m.api.ws_dropped = h.dropped;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
 /// Listens on every address in `addrs` for the life of the process, with one
