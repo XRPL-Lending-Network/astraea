@@ -1,5 +1,7 @@
-//! NFT methods that read the ledger state, as in Clio 2.8: account_nfts,
-//! nft_buy_offers and nft_sell_offers.
+//! NFT methods, as in Clio 2.8. account_nfts, nft_buy_offers and
+//! nft_sell_offers read the ledger state; nft_info, nft_history and
+//! nfts_by_issuer read the NFT index (`nftindex`, kept in the state store),
+//! and answer `notReady` until its backfill is done.
 //!
 //! account_nfts walks the account's NFT pages from the last one down through
 //! `PreviousPageMin`; `limit` counts pages, and the marker is the key of the
@@ -9,8 +11,12 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::api::{Engine, Res, account_id, internal, invalid_params, keylet, rpc_err};
+use crate::api::{
+    Engine, Res, RpcError, account_id, decode_account, internal, invalid_params, keylet, rpc_err,
+    time_iso,
+};
 use crate::owned::{corrupt, h256};
+use crate::state::{AccountTx, TxPosition};
 use crate::xrpl_json;
 
 const NFTS_LIMIT_MIN: u32 = 20;
@@ -19,6 +25,10 @@ const NFTS_LIMIT_DEFAULT: u32 = 100;
 const OFFERS_LIMIT_MIN: u32 = 50;
 const OFFERS_LIMIT_MAX: u32 = 500;
 const OFFERS_LIMIT_DEFAULT: u32 = 250;
+const HISTORY_LIMIT_MAX: u32 = 100;
+const HISTORY_LIMIT_DEFAULT: u32 = 50;
+const ISSUER_LIMIT_MAX: u32 = 100;
+const ISSUER_LIMIT_DEFAULT: u32 = 50;
 
 /// The parts an NFTokenID is made of.
 #[derive(Debug, PartialEq, Eq)]
@@ -127,7 +137,333 @@ fn offer_json(key: &[u8; 32], node: &Map<String, Value>) -> Res<Value> {
     Ok(Value::Object(o))
 }
 
+/// A required account field with Clio's `accountValidator` errors.
+fn account_field(p: &Map<String, Value>, key: &str) -> Res<[u8; 20]> {
+    match p.get(key) {
+        None => Err(invalid_params(&format!("Required field '{key}' missing"))),
+        Some(Value::String(s)) => {
+            decode_account(s).ok_or_else(|| rpc_err("actMalformed", 35, format!("{key}Malformed")))
+        }
+        Some(_) => Err(invalid_params(&format!("{key}NotString"))),
+    }
+}
+
+/// An optional field that must be a boolean.
+fn bool_field(p: &Map<String, Value>, key: &str) -> Res<bool> {
+    match p.get(key) {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(invalid_params("Invalid parameters.")),
+    }
+}
+
+/// `ledger_index_min` or `_max` of nft_history: a 32-bit integer, -1 for none.
+fn bound(p: &Map<String, Value>, key: &str) -> Res<Option<u32>> {
+    match p.get(key) {
+        None => Ok(None),
+        Some(v) => match v.as_i64().and_then(|n| i32::try_from(n).ok()) {
+            Some(-1) => Ok(None),
+            Some(n) => u32::try_from(n)
+                .map(Some)
+                .map_err(|_| invalid_params("Invalid parameters.")),
+            None => Err(invalid_params("Invalid parameters.")),
+        },
+    }
+}
+
+fn not_ready() -> RpcError {
+    rpc_err("notReady", 13, "Not ready to handle this request.")
+}
+
+/// The fields nft_info and each nfts_by_issuer entry share.
+fn token_info(m: &mut Map<String, Value>, id: &[u8; 32]) {
+    let t = token_id(id);
+    m.insert("flags".into(), json!(t.flags));
+    m.insert("transfer_fee".into(), json!(t.transfer_fee));
+    m.insert("issuer".into(), json!(xrpl_json::account(&t.issuer)));
+    m.insert("nft_taxon".into(), json!(t.taxon));
+    m.insert("nft_serial".into(), json!(t.serial));
+}
+
 impl Engine {
+    /// The NFT index is filled down to its start.
+    fn nft_ready(&self) -> Res<()> {
+        match self.state.nft_coverage().map_err(internal)? {
+            Some(_) => Ok(()),
+            None => Err(not_ready()),
+        }
+    }
+
+    pub(crate) fn nft_info(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
+        let id = hex256(p, "nft_id")?
+            .ok_or_else(|| invalid_params("Required field 'nft_id' missing"))?;
+        let seq = self.resolve(p)?;
+        self.nft_ready()?;
+        let (at, owner, burned) = self
+            .state
+            .nft_at(&id, seq)
+            .map_err(internal)?
+            .ok_or_else(|| rpc_err("objectNotFound", 92, "NFT not found"))?;
+        let uri = self.state.nft_uri_at(&id, seq).map_err(internal)?;
+        let mut m = Map::new();
+        m.insert("nft_id".into(), json!(hex::encode_upper(id)));
+        m.insert("ledger_index".into(), json!(at));
+        m.insert("owner".into(), json!(xrpl_json::account(&owner)));
+        m.insert("is_burned".into(), json!(burned));
+        token_info(&mut m, &id);
+        m.insert("validated".into(), json!(true));
+        m.insert(
+            "uri".into(),
+            json!(hex::encode_upper(uri.unwrap_or_default())),
+        );
+        Ok(m)
+    }
+
+    /// Clio's `NFTsByIssuerHandler`: the issuer's tokens by taxon and ID, each
+    /// as of the ledger asked; a token minted after it is left out, but still
+    /// counts toward the page.
+    pub(crate) fn nfts_by_issuer(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
+        let issuer = account_field(p, "issuer")?;
+        let taxon = match p.get("nft_taxon") {
+            None => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| invalid_params("Invalid parameters."))?,
+            ),
+        };
+        let limit = limit(p, 1, ISSUER_LIMIT_MAX, ISSUER_LIMIT_DEFAULT)?;
+        let marker = hex256(p, "marker")?;
+        let seq = self.resolve_state(p)?;
+        if self.fetch(&keylet(b'a', &[&issuer]), seq)?.is_none() {
+            return Err(rpc_err("actNotFound", 19, "Account not found."));
+        }
+        self.nft_ready()?;
+        let after = marker.map(|c| (taxon.unwrap_or_else(|| token_id(&c).taxon), c));
+        let ids = self
+            .state
+            .nfts_by_issuer(&issuer, taxon, after, limit as usize)
+            .map_err(internal)?;
+        let mut nfts = Vec::with_capacity(ids.len());
+        for id in &ids {
+            crate::limits::check_rpc()?;
+            let Some((at, owner, burned)) = self.state.nft_at(id, seq).map_err(internal)? else {
+                continue;
+            };
+            let uri = self.state.nft_uri_at(id, seq).map_err(internal)?;
+            let mut n = Map::new();
+            n.insert("nft_id".into(), json!(hex::encode_upper(id)));
+            n.insert("ledger_index".into(), json!(at));
+            n.insert("owner".into(), json!(xrpl_json::account(&owner)));
+            n.insert("is_burned".into(), json!(burned));
+            n.insert(
+                "uri".into(),
+                json!(hex::encode_upper(uri.unwrap_or_default())),
+            );
+            token_info(&mut n, id);
+            nfts.push(Value::Object(n));
+        }
+        let mut m = Map::new();
+        m.insert("issuer".into(), json!(xrpl_json::account(&issuer)));
+        m.insert("limit".into(), json!(limit));
+        m.insert("ledger_index".into(), json!(seq));
+        m.insert("nfts".into(), Value::Array(nfts));
+        m.insert("validated".into(), json!(true));
+        if ids.len() == limit as usize
+            && let Some(last) = ids.last()
+        {
+            m.insert("marker".into(), json!(hex::encode_upper(last)));
+        }
+        if let Some(t) = taxon {
+            m.insert("nft_taxon".into(), json!(t));
+        }
+        Ok(m)
+    }
+
+    /// Clio's `NFTHistoryHandler`. Unlike account_tx, the marker of a
+    /// forward page is the position right after the last transaction, and
+    /// transactions carry neither ctid nor the synthetic NFT fields.
+    pub(crate) fn nft_history(&self, p: &Map<String, Value>, api: u32) -> Res<Map<String, Value>> {
+        let id = hex256(p, "nft_id")?
+            .ok_or_else(|| invalid_params("Required field 'nft_id' missing"))?;
+        let (lo, hi) = (bound(p, "ledger_index_min")?, bound(p, "ledger_index_max")?);
+        let binary = bool_field(p, "binary")?;
+        let forward = bool_field(p, "forward")?;
+        let take = match p.get("limit") {
+            None => None,
+            Some(_) => Some(limit(p, 1, HISTORY_LIMIT_MAX, HISTORY_LIMIT_DEFAULT)?),
+        };
+        let marker = match p.get("marker") {
+            None => None,
+            Some(Value::Object(mk)) => {
+                let part = |k: &str| -> Res<u32> {
+                    match mk.get(k) {
+                        None => Err(invalid_params(&format!("Required field '{k}' missing"))),
+                        Some(v) => v
+                            .as_u64()
+                            .and_then(|n| u32::try_from(n).ok())
+                            .ok_or_else(|| invalid_params("Invalid parameters.")),
+                    }
+                };
+                Some(TxPosition {
+                    ledger: part("ledger")?,
+                    index: part("seq")?,
+                })
+            }
+            Some(_) => return Err(invalid_params("invalidMarker")),
+        };
+        let (range_min, range_max) = self.range()?;
+        let (mut min, mut max) = (range_min, range_max);
+        if let Some(lo) = lo {
+            if lo > range_max || lo < range_min {
+                return Err(rpc_err("lgrIdxMalformed", 58, "ledgerSeqMinOutOfRange"));
+            }
+            min = lo;
+        }
+        if let Some(hi) = hi {
+            if hi > range_max || hi < range_min {
+                return Err(rpc_err("lgrIdxMalformed", 58, "ledgerSeqMaxOutOfRange"));
+            }
+            max = hi;
+        }
+        if min > max {
+            return Err(rpc_err("lgrIdxsInvalid", 57, "Ledger indexes invalid."));
+        }
+        // Like Clio, `"validated"` counts as no ledger given.
+        let index_given = p
+            .get("ledger_index")
+            .is_some_and(|v| crate::api::as_u32(v).is_some());
+        if p.contains_key("ledger_hash") || index_given {
+            if lo.is_some() || hi.is_some() {
+                return Err(invalid_params("containsLedgerSpecifierAndRange"));
+            }
+            let seq = self.resolve(p)?;
+            (min, max) = (seq, seq);
+        }
+        self.nft_ready()?;
+        let n = take.unwrap_or(HISTORY_LIMIT_DEFAULT) as usize;
+        let cursor = marker.unwrap_or(if forward {
+            TxPosition {
+                ledger: min,
+                index: 0,
+            }
+        } else {
+            TxPosition {
+                ledger: max,
+                index: i32::MAX as u32,
+            }
+        });
+        // Clio reads positions from the cursor on going forward, and strictly
+        // before it going back; the range only cuts the page afterwards.
+        let list = if forward {
+            let end = TxPosition {
+                ledger: u32::MAX,
+                index: u32::MAX,
+            };
+            self.state.nft_txs(&id, cursor, end, true, n)
+        } else {
+            let end = match (cursor.ledger, cursor.index) {
+                (0, 0) => None,
+                (l, 0) => Some(TxPosition {
+                    ledger: l - 1,
+                    index: u32::MAX,
+                }),
+                (l, i) => Some(TxPosition {
+                    ledger: l,
+                    index: i - 1,
+                }),
+            };
+            match end {
+                Some(e) => self.state.nft_txs(
+                    &id,
+                    TxPosition {
+                        ledger: 0,
+                        index: 0,
+                    },
+                    e,
+                    false,
+                    n,
+                ),
+                None => Ok(Vec::new()),
+            }
+        }
+        .map_err(internal)?;
+        let mut next = None;
+        if list.len() == n
+            && let Some(last) = list.last()
+        {
+            next = Some(if forward {
+                TxPosition {
+                    ledger: last.at.ledger,
+                    index: last.at.index.wrapping_add(1),
+                }
+            } else {
+                last.at
+            });
+        }
+        let mut keep: Vec<AccountTx> = Vec::with_capacity(list.len());
+        for t in list {
+            if (t.at.ledger < min && !forward) || (t.at.ledger > max && forward) {
+                next = None;
+                break;
+            }
+            if t.at.ledger > max && !forward {
+                continue;
+            }
+            keep.push(t);
+        }
+        let mut out = Vec::with_capacity(keep.len());
+        self.txs_at(&keep, &mut |t, tx, meta, h| {
+            let mut obj = Map::new();
+            if binary {
+                obj.insert("tx_blob".into(), json!(hex::encode_upper(tx)));
+                obj.insert(
+                    if api > 1 { "meta_blob" } else { "meta" }.into(),
+                    json!(hex::encode_upper(meta)),
+                );
+                obj.insert("ledger_index".into(), json!(t.at.ledger));
+                obj.insert("date".into(), json!(h.close_time));
+            } else {
+                let e = self.expand(tx, meta, t.at.ledger, api, false, false)?;
+                let mut tj = e.tx;
+                tj.insert("ledger_index".into(), json!(t.at.ledger));
+                tj.insert("date".into(), json!(h.close_time));
+                if api > 1 {
+                    obj.insert("ledger_index".into(), json!(t.at.ledger));
+                    if let Some(hv) = tj.remove("hash") {
+                        obj.insert("hash".into(), hv);
+                    }
+                    obj.insert("close_time_iso".into(), json!(time_iso(h.close_time)));
+                    obj.insert("ledger_hash".into(), json!(hex::encode_upper(h.hash())));
+                }
+                obj.insert("meta".into(), Value::Object(e.meta));
+                obj.insert(
+                    if api > 1 { "tx_json" } else { "tx" }.into(),
+                    Value::Object(tj),
+                );
+            }
+            obj.insert("validated".into(), json!(true));
+            out.push(Value::Object(obj));
+            Ok(())
+        })?;
+        let mut m = Map::new();
+        m.insert("nft_id".into(), json!(hex::encode_upper(id)));
+        m.insert("ledger_index_min".into(), json!(min));
+        m.insert("ledger_index_max".into(), json!(max));
+        m.insert("transactions".into(), Value::Array(out));
+        m.insert("validated".into(), json!(true));
+        if let Some(mk) = next {
+            m.insert(
+                "marker".into(),
+                json!({"ledger": mk.ledger, "seq": mk.index}),
+            );
+        }
+        if let Some(l) = take {
+            m.insert("limit".into(), json!(l));
+        }
+        Ok(m)
+    }
+
     pub(crate) fn account_nfts(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
         // Clio checks the fields in this order: account, marker, limit.
         account_id(

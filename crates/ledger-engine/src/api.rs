@@ -127,16 +127,16 @@ pub(crate) fn api_version(p: &Map<String, Value>) -> Res<u32> {
 }
 
 pub(crate) fn account_id(v: &Value) -> Res<[u8; 20]> {
-    let s = v
-        .as_str()
-        .ok_or_else(|| rpc_err("actMalformed", 35, "accountMalformed"))?;
+    v.as_str()
+        .and_then(decode_account)
+        .ok_or_else(|| rpc_err("actMalformed", 35, "accountMalformed"))
+}
+
+/// An account ID from its base58 address.
+pub(crate) fn decode_account(s: &str) -> Option<[u8; 20]> {
     match decode_base58(s) {
-        Some((0, a)) if a.len() == 20 => {
-            let mut out = [0u8; 20];
-            out.copy_from_slice(&a);
-            Ok(out)
-        }
-        _ => Err(rpc_err("actMalformed", 35, "accountMalformed")),
+        Some((0, a)) => a.try_into().ok(),
+        _ => None,
     }
 }
 
@@ -175,6 +175,10 @@ pub struct Engine {
     /// Latest quorum for server_info: ledger and count.
     pub quorum: std::sync::Mutex<(u32, usize)>,
 }
+
+/// What to do with each transaction `txs_at` reads: its position, the
+/// transaction, its metadata and the ledger's header.
+pub(crate) type TxVisit<'a> = dyn FnMut(&AccountTx, &[u8], &[u8], &LedgerHeader) -> Res<()> + 'a;
 
 /// Transaction with metadata as JSON, plus what responses need to know about it.
 pub(crate) struct Expanded {
@@ -453,6 +457,9 @@ impl Engine {
             "account_nfts" => self.account_nfts(p),
             "nft_buy_offers" => self.nft_buy_offers(p),
             "nft_sell_offers" => self.nft_sell_offers(p),
+            "nft_info" => self.nft_info(p),
+            "nft_history" => self.nft_history(p, api),
+            "nfts_by_issuer" => self.nfts_by_issuer(p),
             "ledger_data" => self.ledger_data(p, api),
             "book_changes" => self.book_changes(p),
             "proof_ledger" => self.proof_ledger(p),
@@ -928,42 +935,8 @@ impl Engine {
             },
         };
         let binary = as_bool(p.get("binary"));
-        // Cold transactions of the page are read up front, block by block in
-        // parallel, and only those: a ledger's other transactions are not decoded.
-        let hot_first = self.hot_first()?;
-        let wants: Vec<(u32, u32)> = page
-            .transactions
-            .iter()
-            .filter(|t| t.at.ledger < hot_first && t.pos == u32::MAX)
-            .map(|t| (t.at.ledger, t.at.index))
-            .collect();
-        let mut cold = self.blocks.cold_transactions(&wants).map_err(internal)?;
         let mut out = Vec::with_capacity(page.transactions.len());
-        let mut cache: Option<(u32, Ledger)> = None;
-        for t in &page.transactions {
-            crate::limits::check_rpc()?;
-            if cache.as_ref().is_none_or(|(s, _)| *s != t.at.ledger) {
-                let l = match cold.remove(&t.at.ledger) {
-                    Some(l) => l,
-                    None => self.ledger(t.at.ledger)?,
-                };
-                cache = Some((t.at.ledger, l));
-            }
-            let Some((_, l)) = &cache else { continue };
-            // Cold indexes don't know the position in the ledger, so look it up by
-            // TransactionIndex.
-            let pos = if t.pos == u32::MAX {
-                l.transactions
-                    .iter()
-                    .position(|(_, m)| tx_index_of(m) == Some(t.at.index))
-                    .ok_or_else(|| internal("no transaction with this TransactionIndex".into()))?
-            } else {
-                t.pos as usize
-            };
-            let (tx, meta) = l
-                .transactions
-                .get(pos)
-                .ok_or_else(|| internal("no transaction at this position".into()))?;
+        self.txs_at(&page.transactions, &mut |t, tx, meta, h| {
             let mut obj = Map::new();
             if binary {
                 obj.insert(
@@ -974,15 +947,13 @@ impl Engine {
                 obj.insert("validated".into(), json!(true));
                 obj.insert("ledger_index".into(), json!(t.at.ledger));
                 out.push(Value::Object(obj));
-                continue;
+                return Ok(());
             }
             let e = self.expand(tx, meta, t.at.ledger, api, false, true)?;
             let mut tj = e.tx;
             if let Some(c) = self.ctid(t.at.ledger, e.index) {
                 tj.insert("ctid".into(), json!(c));
             }
-            // The header comes with the ledger already read for this page.
-            let h = LedgerHeader::parse(&l.header).map_err(|e| internal(e.to_string()))?;
             tj.insert("date".into(), json!(h.close_time));
             tj.insert("ledger_index".into(), json!(t.at.ledger));
             if api < 2 {
@@ -1002,7 +973,8 @@ impl Engine {
             );
             obj.insert("validated".into(), json!(true));
             out.push(Value::Object(obj));
-        }
+            Ok(())
+        })?;
         let mut m = Map::new();
         m.insert("account".into(), json!(xrpl_json::account(&account)));
         m.insert("ledger_index_min".into(), json!(min));
@@ -1022,6 +994,44 @@ impl Engine {
             m.insert("limit".into(), json!(l.clamp(1, ACCOUNT_TX_LIMIT_MAX)));
         }
         Ok(m)
+    }
+
+    /// The transactions at these positions, in order, each with its
+    /// ledger's header. Cold ones are read up front, block by block in
+    /// parallel, and only those: a ledger's other transactions are not decoded.
+    /// A transaction is found by TransactionIndex; the stored position is a
+    /// hint, and cold history doesn't know it.
+    pub(crate) fn txs_at(&self, list: &[AccountTx], each: &mut TxVisit<'_>) -> Res<()> {
+        let hot_first = self.hot_first()?;
+        let wants: Vec<(u32, u32)> = list
+            .iter()
+            .filter(|t| t.at.ledger < hot_first)
+            .map(|t| (t.at.ledger, t.at.index))
+            .collect();
+        let mut cold = self.blocks.cold_transactions(&wants).map_err(internal)?;
+        let mut cache: Option<(u32, Ledger, LedgerHeader)> = None;
+        for t in list {
+            crate::limits::check_rpc()?;
+            if cache.as_ref().is_none_or(|(s, _, _)| *s != t.at.ledger) {
+                let l = match cold.remove(&t.at.ledger) {
+                    Some(l) => l,
+                    None => self.ledger(t.at.ledger)?,
+                };
+                let h = LedgerHeader::parse(&l.header).map_err(|e| internal(e.to_string()))?;
+                cache = Some((t.at.ledger, l, h));
+            }
+            let Some((_, l, h)) = &cache else { continue };
+            let is = |(_, m): &&(Vec<u8>, Vec<u8>)| tx_index_of(m) == Some(t.at.index);
+            let (tx, meta) =
+                match l.transactions.get(t.pos as usize).filter(is) {
+                    Some(x) => x,
+                    None => l.transactions.iter().find(is).ok_or_else(|| {
+                        internal("no transaction with this TransactionIndex".into())
+                    })?,
+                };
+            each(t, tx, meta, h)?;
+        }
+        Ok(())
     }
 
     fn ledger_entry(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {

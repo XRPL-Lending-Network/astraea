@@ -34,7 +34,7 @@ Both feed the API. More detail in [docs/architecture.md](docs/architecture.md).
 
 Clio-compatible methods, answered from Astraea's own data:
 
-`server_info`, `ping`, `ledger`, `tx` (by hash or CTID), `account_tx`, `account_info`, `account_lines`, `account_objects`, `account_offers`, `ledger_entry`, `ledger_data`, `mpt_holders`, `account_nfts`, `nft_buy_offers`, `nft_sell_offers`, `book_changes`, and WebSocket `subscribe` for the `ledger`, `transactions` and `book_changes` streams and for accounts.
+`server_info`, `ping`, `ledger`, `tx` (by hash or CTID), `account_tx`, `account_info`, `account_lines`, `account_objects`, `account_offers`, `ledger_entry`, `ledger_data`, `mpt_holders`, `account_nfts`, `nft_buy_offers`, `nft_sell_offers`, `nft_info`, `nft_history`, `nfts_by_issuer`, `book_changes`, and WebSocket `subscribe` for the `ledger`, `transactions` and `book_changes` streams and for accounts.
 
 Methods that Clio forwards to a node (`fee`, `server_state`, `ledger_current`, `server_definitions`, and read-only queries against the open ledger) are forwarded the same way. Submitting transactions is not supported.
 

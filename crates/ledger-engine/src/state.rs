@@ -29,6 +29,13 @@
 //! ledger changed, as (slot u16, hash) pairs, all 4096 of them every 256
 //! ledgers. A path at an earlier ledger takes the top of the tree from there
 //! and rebuilds the subtree below from the object versions (`state_path_at`).
+//!
+//! And the NFT index (module `nftindex`), Clio's four NFT tables:
+//! `nft_owner` (token, ledger → owner and whether burned), `nft_uri` (token,
+//! ledger → URI), `nft_issuer` (issuer, taxon, token) and `nft_tx` (token,
+//! ledger, TransactionIndex → position in the ledger). Ledgers from the one
+//! the index started at are indexed as they are applied; earlier ones are
+//! filled in once, in the background (`backfill_nfts`).
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 
@@ -56,6 +63,11 @@ const CONFIRMED: &[u8] = b"confirmed_ledger";
 const MPT_INDEXED: &[u8] = b"mpt_holders_indexed";
 /// LedgerEntryType of an MPToken object.
 const LT_MPTOKEN: u16 = 0x007F;
+/// First ledger indexed for NFTs as it was applied.
+const NFT_FROM: &[u8] = b"nft_from";
+/// First ledger of the NFT backfill, and the next one it will read.
+const NFT_FILL_FROM: &[u8] = b"nft_fill_from";
+const NFT_FILL: &[u8] = b"nft_fill";
 
 /// Transaction position: the ledger and the order within it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -96,6 +108,9 @@ fn be32(b: &[u8]) -> u32 {
 fn err(e: fjall::Error) -> String {
     e.to_string()
 }
+
+/// Reads the asked ledgers, in order.
+pub type ReadLedgers<'a> = dyn Fn(&[u32]) -> Result<Vec<Ledger>, String> + 'a;
 
 /// MPT issuance and holder account.
 type Holder = ([u8; 24], [u8; 20]);
@@ -165,6 +180,14 @@ pub struct StateStore {
     mpt_holders: Keyspace,
     /// MPToken key → issuance and account: used to recognize a deleted MPToken.
     mpt_keys: Keyspace,
+    /// NFT index: token + ledger → owner (20) + burned (1).
+    nft_owner: Keyspace,
+    /// token + ledger → URI.
+    nft_uri: Keyspace,
+    /// issuer + taxon + token → nothing.
+    nft_issuer: Keyspace,
+    /// token + ledger + TransactionIndex → position in the ledger.
+    nft_tx: Keyspace,
     tree: StateTree,
     /// Tree history: ledger → changed subtrees at depth 3.
     levels: Keyspace,
@@ -222,6 +245,12 @@ impl StateStore {
         let evidence = ks("evidence")?;
         let levels = ks("levels")?;
         let (mpt_holders, mpt_keys) = (ks("mpt_holders")?, ks("mpt_keys")?);
+        let (nft_owner, nft_uri, nft_issuer, nft_tx) = (
+            ks("nft_owner")?,
+            ks("nft_uri")?,
+            ks("nft_issuer")?,
+            ks("nft_tx")?,
+        );
         Ok(StateStore {
             db,
             objects,
@@ -232,6 +261,10 @@ impl StateStore {
             account_tx,
             mpt_holders,
             mpt_keys,
+            nft_owner,
+            nft_uri,
+            nft_issuer,
+            nft_tx,
             tree,
             levels,
             evidence,
@@ -948,8 +981,290 @@ impl StateStore {
                 b.insert(&self.account_tx, account_key(a, at), e.pos.to_be_bytes());
             }
         }
+        if self.nft_from()?.is_some_and(|f| sequence >= f) {
+            self.nft_rows(b, sequence, ledger);
+        }
         b.insert(&self.meta, INDEXED, sequence.to_be_bytes());
         Ok(())
+    }
+
+    /// A ledger's rows in the NFT index. A transaction whose effect can't
+    /// be read is logged and keeps only its history entry, so one odd
+    /// transaction does not stop loading.
+    fn nft_rows(&self, b: &mut fjall::OwnedWriteBatch, sequence: u32, ledger: &Ledger) -> usize {
+        let n = crate::nftindex::nft_ledger(ledger);
+        for p in &n.problems {
+            tracing::warn!("NFT index, ledger {sequence}: {p}");
+        }
+        self.put_nft_rows(b, sequence, &n);
+        n.txs.len()
+    }
+
+    fn put_nft_rows(
+        &self,
+        b: &mut fjall::OwnedWriteBatch,
+        sequence: u32,
+        n: &crate::nftindex::NftLedger,
+    ) {
+        let seq = sequence.to_be_bytes();
+        for (t, index, pos) in &n.txs {
+            b.insert(
+                &self.nft_tx,
+                [&t[..], &seq, &index.to_be_bytes()].concat(),
+                pos.to_be_bytes(),
+            );
+        }
+        for (t, (owner, burned)) in &n.owners {
+            b.insert(
+                &self.nft_owner,
+                [&t[..], &seq].concat(),
+                [&owner[..], &[u8::from(*burned)]].concat(),
+            );
+        }
+        for (t, uri) in &n.uris {
+            b.insert(&self.nft_uri, [&t[..], &seq].concat(), uri);
+        }
+        for t in &n.minted {
+            let id = crate::nft::token_id(t);
+            b.insert(
+                &self.nft_issuer,
+                [&id.issuer[..], &id.taxon.to_be_bytes(), &t[..]].concat(),
+                [],
+            );
+        }
+    }
+
+    /// First ledger indexed for NFTs as it is applied.
+    pub fn nft_from(&self) -> Result<Option<u32>, String> {
+        self.meta_u32(NFT_FROM)
+    }
+
+    /// Starts the NFT index at the next ledger to be applied, if it hasn't
+    /// started; returns the ledger it starts at.
+    pub fn start_nft_index(&self) -> Result<u32, String> {
+        if let Some(f) = self.nft_from()? {
+            return Ok(f);
+        }
+        let from = self.last()?.ok_or("state is empty")? + 1;
+        self.meta
+            .insert(NFT_FROM, from.to_be_bytes())
+            .map_err(err)?;
+        Ok(from)
+    }
+
+    /// The ledgers the NFT index covers: from the first one backfilled up to
+    /// the last applied, once the backfill has reached the live part.
+    pub fn nft_coverage(&self) -> Result<Option<u32>, String> {
+        match (self.nft_from()?, self.meta_u32(NFT_FILL)?) {
+            (Some(from), Some(fill)) if fill >= from => self.meta_u32(NFT_FILL_FROM),
+            _ => Ok(None),
+        }
+    }
+
+    /// Fills the NFT index for ledgers `start..nft_from`, `chunk` ledgers per
+    /// batch; `read` returns the asked ledgers in order. Progress is stored
+    /// with each batch, so a restart continues where it stopped. Returns the
+    /// ledgers filled, or `None` if there was nothing to do.
+    pub fn backfill_nfts(
+        &self,
+        start: u32,
+        chunk: u32,
+        read: &ReadLedgers<'_>,
+        progress: &dyn Fn(u32, u32),
+    ) -> Result<Option<(u32, u32)>, String> {
+        let Some(to) = self.nft_from()? else {
+            return Ok(None);
+        };
+        let mut fill = match self.meta_u32(NFT_FILL)? {
+            Some(f) => f,
+            None => {
+                let mut b = self.db.batch();
+                b.insert(&self.meta, NFT_FILL_FROM, start.to_be_bytes());
+                b.insert(&self.meta, NFT_FILL, start.to_be_bytes());
+                b.commit().map_err(err)?;
+                start
+            }
+        };
+        if fill >= to {
+            return Ok(None);
+        }
+        let from = self.meta_u32(NFT_FILL_FROM)?.unwrap_or(start);
+        while fill < to {
+            let end = fill.saturating_add(chunk.max(1)).min(to);
+            let seqs: Vec<u32> = (fill..end).collect();
+            let ledgers = read(&seqs)?;
+            if ledgers.len() != seqs.len() {
+                return Err(format!(
+                    "NFT backfill: asked for {} ledgers from {fill}, got {}",
+                    seqs.len(),
+                    ledgers.len()
+                ));
+            }
+            for (seq, l) in seqs.iter().zip(&ledgers) {
+                if l.header()?.sequence != *seq {
+                    return Err(format!("NFT backfill: ledger {seq} came back as another"));
+                }
+            }
+            // Decoding NFT transactions is the slow part: on several threads.
+            let piece = ledgers.len().div_ceil(8).max(1);
+            let parsed: Vec<crate::nftindex::NftLedger> = std::thread::scope(|s| {
+                let hs: Vec<_> = ledgers
+                    .chunks(piece)
+                    .map(|c| {
+                        s.spawn(|| {
+                            c.iter()
+                                .map(crate::nftindex::nft_ledger)
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                hs.into_iter()
+                    .map(|h| {
+                        h.join()
+                            .map_err(|_| "NFT backfill parser panicked".to_string())
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })?
+            .into_iter()
+            .flatten()
+            .collect();
+            let mut b = self.db.batch();
+            for (seq, n) in seqs.iter().zip(&parsed) {
+                for p in &n.problems {
+                    tracing::warn!("NFT index, ledger {seq}: {p}");
+                }
+                self.put_nft_rows(&mut b, *seq, n);
+            }
+            b.insert(&self.meta, NFT_FILL, end.to_be_bytes());
+            b.commit().map_err(err)?;
+            fill = end;
+            progress(fill, to);
+        }
+        self.persist()?;
+        Ok(Some((from, to)))
+    }
+
+    /// The starting point for an NFT index whose history doesn't reach back to
+    /// the first NFTs: every token in the state at the snapshot ledger, at the
+    /// owner whose page holds it, as Clio fills its tables from its first
+    /// ledger. The backfill then continues from the next ledger. Does nothing
+    /// once the backfill has started; an interrupted seeding starts over.
+    pub fn seed_nfts(&self) -> Result<(), String> {
+        if self.meta_u32(NFT_FILL)?.is_some() {
+            return Ok(());
+        }
+        let base = self.base()?.ok_or("state is empty")?;
+        let mut b = self.db.batch();
+        let mut pending = 0usize;
+        for item in self.objects_at(base) {
+            let (key, data) = item?;
+            if let Some(n) = crate::nftindex::nft_page(&key, &data) {
+                pending += n.owners.len();
+                self.put_nft_rows(&mut b, base, &n);
+            }
+            if pending >= 10_000 {
+                std::mem::replace(&mut b, self.db.batch())
+                    .commit()
+                    .map_err(err)?;
+                pending = 0;
+            }
+        }
+        b.insert(&self.meta, NFT_FILL_FROM, base.to_be_bytes());
+        b.insert(&self.meta, NFT_FILL, (base + 1).to_be_bytes());
+        b.commit().map_err(err)
+    }
+
+    /// The token as of ledger `at`: the ledger of its last owner change, the
+    /// owner, whether burned.
+    pub fn nft_at(
+        &self,
+        token: &[u8; 32],
+        at: u32,
+    ) -> Result<Option<(u32, [u8; 20], bool)>, String> {
+        let lo = [&token[..], &0u32.to_be_bytes()].concat();
+        let hi = [&token[..], &at.to_be_bytes()].concat();
+        let Some(g) = self.nft_owner.range(lo..=hi).next_back() else {
+            return Ok(None);
+        };
+        let (k, v) = g.into_inner().map_err(err)?;
+        if v.len() != 21 {
+            return Err("nft_owner record".into());
+        }
+        let owner: [u8; 20] = v[..20].try_into().map_err(|_| "nft_owner record")?;
+        Ok(Some((be32(&k[32..36]), owner, v[20] != 0)))
+    }
+
+    /// The token's URI as of ledger `at`.
+    pub fn nft_uri_at(&self, token: &[u8; 32], at: u32) -> Result<Option<Vec<u8>>, String> {
+        let lo = [&token[..], &0u32.to_be_bytes()].concat();
+        let hi = [&token[..], &at.to_be_bytes()].concat();
+        match self.nft_uri.range(lo..=hi).next_back() {
+            Some(g) => Ok(Some(g.into_inner().map_err(err)?.1.to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// The token's transactions between `lo` and `hi` inclusive, ascending
+    /// (`forward`) or descending, at most `limit`.
+    pub fn nft_txs(
+        &self,
+        token: &[u8; 32],
+        lo: TxPosition,
+        hi: TxPosition,
+        forward: bool,
+        limit: usize,
+    ) -> Result<Vec<AccountTx>, String> {
+        if lo > hi {
+            return Ok(Vec::new());
+        }
+        let key =
+            |p: TxPosition| [&token[..], &p.ledger.to_be_bytes(), &p.index.to_be_bytes()].concat();
+        let range = self.nft_tx.range(key(lo)..=key(hi));
+        let items: Box<dyn Iterator<Item = fjall::Guard>> = if forward {
+            Box::new(range)
+        } else {
+            Box::new(range.rev())
+        };
+        let mut out = Vec::new();
+        for g in items.take(limit) {
+            let (k, v) = g.into_inner().map_err(err)?;
+            out.push(AccountTx {
+                at: TxPosition {
+                    ledger: be32(&k[32..36]),
+                    index: be32(&k[36..40]),
+                },
+                pos: be32(&v),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Tokens minted by `issuer`, by taxon then token, strictly after
+    /// `after` (taxon, token); only of `taxon` if given. At most `limit`.
+    pub fn nfts_by_issuer(
+        &self,
+        issuer: &[u8; 20],
+        taxon: Option<u32>,
+        after: Option<(u32, [u8; 32])>,
+        limit: usize,
+    ) -> Result<Vec<[u8; 32]>, String> {
+        use std::ops::Bound;
+        let key = |t: u32, id: &[u8; 32]| [&issuer[..], &t.to_be_bytes(), &id[..]].concat();
+        let start = match after {
+            Some((t, id)) => Bound::Excluded(key(t, &id)),
+            None => Bound::Included(key(taxon.unwrap_or(0), &[0; 32])),
+        };
+        let end = Bound::Included(key(taxon.unwrap_or(u32::MAX), &[0xFF; 32]));
+        let mut out = Vec::new();
+        for g in self
+            .nft_issuer
+            .range::<Vec<u8>, _>((start, end))
+            .take(limit)
+        {
+            let k = g.key().map_err(err)?;
+            out.push(k[24..56].try_into().map_err(|_| "nft_issuer record")?);
+        }
+        Ok(out)
     }
 
     /// On-disk size and approximate record count of each index. Fresh
@@ -960,6 +1275,10 @@ impl StateStore {
             ("ledger_hash", &self.ledger_hash),
             ("account_tx", &self.account_tx),
             ("levels", &self.levels),
+            ("nft_owner", &self.nft_owner),
+            ("nft_uri", &self.nft_uri),
+            ("nft_issuer", &self.nft_issuer),
+            ("nft_tx", &self.nft_tx),
         ]
         .into_iter()
         .map(|(n, k)| (n, k.disk_space(), k.approximate_len()))
@@ -1873,6 +2192,163 @@ mod tests {
                 assert_eq!(object.as_ref(), st.get(&k), "ledger {seq}, key {i}");
             }
         }
+    }
+
+    #[test]
+    fn nft_index_answers_owner_uri_history_and_issuer() {
+        use crate::nftindex::NftLedger;
+        let dir = tempfile::tempdir().unwrap();
+        let s = StateStore::open(dir.path()).unwrap();
+        // Token 2 of issuer [4; 20] with taxon 0 (serial 0 ciphers taxon 0 as 2459).
+        let mut t = [0u8; 32];
+        t[4..24].fill(4);
+        t[24..28].copy_from_slice(&2459u32.to_be_bytes());
+        let put = |seq: u32, n: NftLedger| {
+            let mut b = s.db.batch();
+            s.put_nft_rows(&mut b, seq, &n);
+            b.commit().unwrap();
+        };
+        // Minted to 7 in ledger 10, sold to 8 in 12 (two transactions), URI changed in 13, burned in 15.
+        put(
+            10,
+            NftLedger {
+                txs: vec![(t, 3, 0)],
+                owners: [(t, ([7; 20], false))].into(),
+                uris: [(t, vec![1])].into(),
+                minted: [t].into(),
+                ..NftLedger::default()
+            },
+        );
+        put(
+            12,
+            NftLedger {
+                txs: vec![(t, 0, 5), (t, 4, 1)],
+                owners: [(t, ([8; 20], false))].into(),
+                ..NftLedger::default()
+            },
+        );
+        put(
+            13,
+            NftLedger {
+                txs: vec![(t, 2, 0)],
+                uris: [(t, vec![2])].into(),
+                ..NftLedger::default()
+            },
+        );
+        put(
+            15,
+            NftLedger {
+                txs: vec![(t, 1, 0)],
+                owners: [(t, ([8; 20], true))].into(),
+                ..NftLedger::default()
+            },
+        );
+        assert_eq!(s.nft_at(&t, 9).unwrap(), None);
+        assert_eq!(s.nft_at(&t, 11).unwrap(), Some((10, [7; 20], false)));
+        assert_eq!(s.nft_at(&t, 14).unwrap(), Some((12, [8; 20], false)));
+        assert_eq!(s.nft_at(&t, 99).unwrap(), Some((15, [8; 20], true)));
+        assert_eq!(s.nft_uri_at(&t, 12).unwrap(), Some(vec![1]));
+        assert_eq!(s.nft_uri_at(&t, 13).unwrap(), Some(vec![2]));
+        let pos = |l, i| TxPosition {
+            ledger: l,
+            index: i,
+        };
+        let all = |fwd| {
+            s.nft_txs(&t, pos(0, 0), pos(u32::MAX, u32::MAX), fwd, 10)
+                .unwrap()
+                .iter()
+                .map(|x| (x.at, x.pos))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            all(true),
+            vec![
+                (pos(10, 3), 0),
+                (pos(12, 0), 5),
+                (pos(12, 4), 1),
+                (pos(13, 2), 0),
+                (pos(15, 1), 0)
+            ]
+        );
+        assert_eq!(all(false)[0], (pos(15, 1), 0));
+        let some = s.nft_txs(&t, pos(12, 1), pos(13, 2), true, 10).unwrap();
+        assert_eq!(some.len(), 2);
+        assert_eq!(s.nfts_by_issuer(&[4; 20], None, None, 10).unwrap(), vec![t]);
+        assert_eq!(
+            s.nfts_by_issuer(&[4; 20], Some(0), None, 10).unwrap(),
+            vec![t]
+        );
+        assert!(
+            s.nfts_by_issuer(&[4; 20], Some(1), None, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.nfts_by_issuer(&[4; 20], None, Some((0, t)), 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            s.nfts_by_issuer(&[5; 20], None, None, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn nft_backfill_resumes_and_reaches_the_live_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = StateStore::open(dir.path()).unwrap();
+        s.load_snapshot(1, &header(1), std::iter::empty()).unwrap();
+        assert_eq!(s.start_nft_index().unwrap(), 2);
+        assert_eq!(s.start_nft_index().unwrap(), 2);
+        assert_eq!(s.nft_coverage().unwrap(), None);
+        let read = |seqs: &[u32]| -> Result<Vec<Ledger>, String> {
+            if seqs.contains(&1) {
+                return Err("ledger 1 is missing".into());
+            }
+            Ok(seqs.iter().map(|&n| empty(n)).collect())
+        };
+        // A missing ledger stops the backfill; progress before it is kept.
+        assert!(s.backfill_nfts(0, 1, &read, &|_, _| {}).is_err());
+        assert_eq!(s.meta_u32(NFT_FILL).unwrap(), Some(1));
+        let read = |seqs: &[u32]| -> Result<Vec<Ledger>, String> {
+            Ok(seqs.iter().map(|&n| empty(n)).collect())
+        };
+        assert_eq!(
+            s.backfill_nfts(0, 1, &read, &|_, _| {}).unwrap(),
+            Some((0, 2))
+        );
+        assert_eq!(s.nft_coverage().unwrap(), Some(0));
+        assert_eq!(s.backfill_nfts(0, 1, &read, &|_, _| {}).unwrap(), None);
+        // Seeding does nothing once the backfill has started.
+        s.seed_nfts().unwrap();
+        assert_eq!(s.nft_coverage().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn nft_index_is_seeded_from_the_snapshot_state() {
+        // An NFT page of account [7; 20] holding one token with URI AB.
+        let mut key = [7u8; 32];
+        key[20..].fill(0xFF);
+        let token = [9u8; 32];
+        let mut page = vec![0x11, 0x00, 0x50];
+        page.extend([0xFA, 0xEC, 0x5A]);
+        page.extend(token);
+        page.extend([0x75, 0x01, 0xAB, 0xE1, 0xF1]);
+        let dir = tempfile::tempdir().unwrap();
+        let s = StateStore::open(dir.path()).unwrap();
+        s.load_snapshot(5, &header(5), std::iter::once(Ok((key, page))))
+            .unwrap();
+        s.start_nft_index().unwrap();
+        s.seed_nfts().unwrap();
+        assert_eq!(s.nft_at(&token, 5).unwrap(), Some((5, [7; 20], false)));
+        assert_eq!(s.nft_uri_at(&token, 5).unwrap(), Some(vec![0xAB]));
+        let read = |seqs: &[u32]| -> Result<Vec<Ledger>, String> {
+            Ok(seqs.iter().map(|&n| empty(n)).collect())
+        };
+        assert_eq!(s.backfill_nfts(0, 8, &read, &|_, _| {}).unwrap(), None);
+        assert_eq!(s.nft_coverage().unwrap(), Some(5));
     }
 
     #[test]

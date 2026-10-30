@@ -645,6 +645,14 @@ impl HistoryReader {
             .clone()
     }
 
+    /// A smaller cold block cache, for a reader that goes through history
+    /// once and must not take the memory the API's reader uses.
+    pub fn with_cold_cache(self, bytes: usize) -> Res<HistoryReader> {
+        let cold = crate::cold::Cold::open(&self.dir)?.with_cache_budget(bytes);
+        *self.cold.write().unwrap_or_else(|p| p.into_inner()) = Arc::new(cold);
+        Ok(self)
+    }
+
     /// Cold segments before hot ones: checks the cold history against the
     /// same queries.
     pub fn with_cold_first(mut self, on: bool) -> HistoryReader {
@@ -895,6 +903,23 @@ impl HistoryReader {
             .filter(|&(s, _)| self.cold_first || self.find(s).is_none())
             .collect();
         self.cold().transactions(&cold)
+    }
+
+    /// Several ledgers without state changes, in the order asked; `None` for
+    /// one the history doesn't hold. Cold ones are read in parallel by block.
+    pub fn ledgers_txs(&self, seqs: &[u32]) -> Res<Vec<Option<Ledger>>> {
+        let cold: Vec<u32> = seqs
+            .iter()
+            .copied()
+            .filter(|&s| self.cold_first || self.find(s).is_none())
+            .collect();
+        let mut got = self.cold().ledgers(&cold)?;
+        seqs.iter()
+            .map(|&s| match got.remove(&s) {
+                Some(l) => Ok(Some(l)),
+                None => self.get_txs_known(s),
+            })
+            .collect()
     }
 
     /// A ledger without state changes (header and transactions), for the API.

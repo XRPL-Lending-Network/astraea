@@ -142,6 +142,81 @@ fn commit(sink: &mut Sink, ledger: &Ledger, metrics: &Shared) -> Result<(), Stri
     Ok(())
 }
 
+/// The ledger with the EnableAmendment of NonFungibleTokensV1_1 on mainnet
+/// (2022-10-31): no NFT transaction can be older.
+const MAINNET_FIRST_NFT_LEDGER: u32 = 75_443_457;
+/// Ledgers per NFT backfill batch, and the cold block cache of its reader.
+const NFT_BACKFILL_CHUNK: u32 = 1024;
+const NFT_BACKFILL_THREADS: usize = 8;
+const NFT_BACKFILL_CACHE: usize = 256 << 20;
+
+fn backfill_nfts(state: &Arc<StateStore>, history: &Path, start: u32) -> Result<(), String> {
+    let reader = HistoryReader::open(history)?
+        .with_prev(Arc::new(prev_of(state)))
+        .with_cold_cache(NFT_BACKFILL_CACHE)?;
+    // Not below the first ledger the history holds.
+    let first = reader
+        .cold_info()
+        .first()
+        .map(|c| c.0)
+        .into_iter()
+        .chain(reader.first())
+        .min()
+        .unwrap_or(start);
+    // Ledgers of one cold block go to one reader thread, and a batch of
+    // recent ledgers fits in a block or two, so the batch is read in pieces
+    // on several threads.
+    let read = |seqs: &[u32]| -> Result<Vec<Ledger>, String> {
+        let piece = seqs.len().div_ceil(NFT_BACKFILL_THREADS).max(1);
+        let parts = std::thread::scope(|s| {
+            let hs: Vec<_> = seqs
+                .chunks(piece)
+                .map(|c| s.spawn(|| reader.ledgers_txs(c)))
+                .collect();
+            hs.into_iter()
+                .map(|h| {
+                    h.join()
+                        .map_err(|_| "NFT backfill reader panicked".to_string())?
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })?;
+        let got = parts.into_iter().flatten();
+        seqs.iter()
+            .zip(got)
+            .map(|(s, l)| match l {
+                Some(l) => Ok(l),
+                None => match state.pending_ledger(*s)? {
+                    Some(b) => Ledger::decode(&b),
+                    None => Err(format!("ledger {s} is not in history")),
+                },
+            })
+            .collect()
+    };
+    let t = Instant::now();
+    let last_log = Mutex::new(Instant::now());
+    let progress = |at: u32, to: u32| {
+        let mut l = last_log.lock().unwrap_or_else(|p| p.into_inner());
+        if l.elapsed() >= Duration::from_secs(300) {
+            info!("NFT index: at ledger {at} of {to}");
+            *l = Instant::now();
+        }
+    };
+    // History that doesn't reach the first NFTs can't say who holds a token
+    // that hasn't moved since: such a store starts from the tokens in its state.
+    if first > start {
+        state.seed_nfts()?;
+    }
+    if let Some((from, to)) =
+        state.backfill_nfts(start.max(first), NFT_BACKFILL_CHUNK, &read, &progress)?
+    {
+        info!(
+            "NFT index filled for ledgers {from}..{to} in {:.0} s",
+            t.elapsed().as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
 /// Previous object versions for format 3 changes, from the state
 /// store: the version as of ledger `at`.
 fn prev_of(
@@ -251,6 +326,10 @@ fn coverage(engine: &Engine) -> metrics::Coverage {
                 "levels" => "tree_history",
                 "tx" => "index_tx",
                 "ledger_hash" => "index_ledger_hash",
+                "nft_owner" => "index_nft_owner",
+                "nft_uri" => "index_nft_uri",
+                "nft_issuer" => "index_nft_issuer",
+                "nft_tx" => "index_nft_tx",
                 _ => "index_account_tx",
             },
             disk,
@@ -300,6 +379,12 @@ impl Sink {
             .hash();
         if let Some(n) = state.ensure_mpt_index()? {
             info!("MPT holder index built: {n} versions");
+        }
+        let nft_from = state.start_nft_index()?;
+        if state.nft_coverage()?.is_none() {
+            info!(
+                "NFT index: from ledger {nft_from} as ledgers arrive; earlier ones in the background"
+            );
         }
         // The state root is checked on every ledger, so the tree is required.
         if state.tree_ledger()? != Some(last) {
@@ -546,6 +631,27 @@ async fn run(args: Args) -> Result<(), String> {
                 ),
                 Ok(None) => {}
                 Err(e) => warn!("tree history not rebuilt: {e}"),
+            }
+        });
+    }
+    // The NFT index below the ledger it started at, filled in the background
+    // with its own cold reader; until it is done the NFT history methods
+    // answer notReady. On a failure it tries again later from where it stopped.
+    {
+        let state = sink.state.clone();
+        let history = args.data_dir.join("history");
+        let start = if args.network_id == 0 {
+            MAINNET_FIRST_NFT_LEDGER
+        } else {
+            0
+        };
+        std::thread::spawn(move || {
+            loop {
+                match backfill_nfts(&state, &history, start) {
+                    Ok(()) => break,
+                    Err(e) => warn!("NFT index not filled yet: {e}; trying again in 10 minutes"),
+                }
+                std::thread::sleep(Duration::from_secs(600));
             }
         });
     }

@@ -24,6 +24,7 @@ Ledgers outside the range get `lgrNotFound`, as on any server that doesn't have 
 | `tx` | by hash or by `ctid`; `binary` supported |
 | `account_tx` | full range, both directions, markers; `limit` defaults to 200, at most 1000 |
 | `book_changes` | by `ledger_index` or `ledger_hash`, over the full range; volumes and rates match xrpld to the last digit |
+| `nft_history` | a token's transactions over the full range, as in Clio: `limit` 1 to 100 (default 50); going forward, the marker is the position right after the last transaction returned |
 
 These work over the whole range, hot and cold. Paging with markers is continuous across the hot/cold boundary and between cold partitions.
 
@@ -38,8 +39,20 @@ These work over the whole range, hot and cold. Paging with markers is continuous
 | `mpt_holders` | as in Clio |
 | `account_nfts` | as in Clio: `limit` counts NFT pages (20 to 400, default 100), and the marker is the key of the next page |
 | `nft_buy_offers`, `nft_sell_offers` | `limit` 50 to 500, default 250; the marker is the first offer of the next page |
+| `nft_info` | a token's owner, whether it is burned, and its URI at any ledger in the range |
+| `nfts_by_issuer` | an issuer's tokens by taxon and ID, each as of the ledger asked; `limit` 1 to 100 (default 50); a token minted after that ledger is left out but counts toward the page, as in Clio |
 
 State exists from the hot store's snapshot onward. A state query for an older ledger returns `lgrNotFound`.
+
+### NFT index
+
+`nft_info`, `nft_history` and `nfts_by_issuer` read an index built from the NFT transactions of every ledger, by the rules Clio uses: the minted token is the one added to the NFT pages, a burn takes the owner from the page that held the token, an accepted offer takes the buyer, or the new holder's page when only a sell offer is given. Only successful transactions count. On mainnet the index starts at ledger 75,443,457, where NonFungibleTokensV1_1 was enabled. A server that adds the index fills the earlier ledgers in the background; until that is done these three methods answer `notReady`.
+
+Where the answers differ from Clio's:
+
+- `ledger_index` of `nft_info` and of `nfts_by_issuer` entries is the ledger of the token's last owner change. Clio fills its NFT tables from the state at the first ledger it loaded, and reports that ledger for every token that hasn't changed since.
+- Tokens burned before a Clio server's first ledger are unknown to it. Here they are found, with `is_burned: true`, and their history is complete.
+- Clio keeps one record per token per ledger, so a token minted and sold in the same ledger loses its URI and its place in `nfts_by_issuer`. Here the mint's URI and issuer entry stay.
 
 ### Server
 

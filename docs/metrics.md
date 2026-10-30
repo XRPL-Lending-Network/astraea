@@ -56,7 +56,7 @@ Refreshed every minute.
 | `astraea_state_first_ledger` | gauge | the state snapshot: state methods start here |
 | `astraea_tree_history_first_ledger` | gauge | first ledger with tree history: `proof_entry` starts here |
 | `astraea_cold_segments`, `astraea_cold_transactions` | gauge | cold history segments and the transactions in them |
-| `astraea_storage_bytes{part}` | gauge | bytes on disk: `state` (the state store, with its indexes and tree history), `hot_history`, `cold_segments`, `cold_indexes`, and inside the state store `index_tx`, `index_ledger_hash`, `index_account_tx`, `tree_history` |
+| `astraea_storage_bytes{part}` | gauge | bytes on disk: `state` (the state store, with its indexes and tree history), `hot_history`, `cold_segments`, `cold_indexes`, and inside the state store `index_tx`, `index_ledger_hash`, `index_account_tx`, `tree_history`, and the NFT index `index_nft_owner`, `index_nft_uri`, `index_nft_issuer`, `index_nft_tx` |
 
 Cold bytes per transaction with all indexes:
 `(astraea_storage_bytes{part="cold_segments"} + on(instance) astraea_storage_bytes{part="cold_indexes"}) / on(instance) astraea_cold_transactions`.
