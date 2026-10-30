@@ -53,24 +53,12 @@ def f(x):
     return f"{x:.1f}".rstrip("0").rstrip(".")
 
 
-def logo_mark(x, y, s=1.0):
-    """The X with six coloured dots around it, as in the company logo."""
-    c = [("magenta", -9, -12), ("blue", 9, -12), ("yellow", -15, 0), ("green", 15, 0),
-         ("coral", -9, 12), ("violet", 9, 12)]
-    out = [f'<g transform="translate({f(x)} {f(y)}) scale({s})">',
-           f'<path d="M-6 -6 L6 6 M6 -6 L-6 6" stroke="{INK}" stroke-width="1.8" stroke-linecap="round"/>']
-    for name, dx, dy in c:
-        out.append(f'<circle cx="{dx}" cy="{dy}" r="2.4" fill="{DOTS[name]}"/>')
-    out.append("</g>")
-    return "".join(out)
-
-
-def wordmark(x, y, h=34.0, stroke=3.0, track=13.0):
+def wordmark(x, y, h=34.0, stroke=3.0, track=13.0, slant=0.0):
     """ASTRAEA drawn as geometric strokes, so it looks the same everywhere.
 
-    Each A has a coloured dot from the logo palette instead of a crossbar,
-    a small star in the name of the star maiden. Glyphs are drawn on a
-    34-unit cap height and scaled to `h`.
+    The A's have no crossbar. Glyphs are drawn on a 34-unit cap height and
+    scaled to `h`; `slant` leans them forward by that many degrees, pivoting
+    on the baseline so the letters keep their place.
     """
     k = h / 34
     glyphs = {
@@ -81,15 +69,13 @@ def wordmark(x, y, h=34.0, stroke=3.0, track=13.0):
         "R": (25, "M0 34 V0 H14 C21 0 25 4 25 9.5 C25 15 21 19 14 19 H0 M13 19 L25 34"),
         "E": (22, "M22 0 H0 V34 H22 M0 17 H18"),
     }
-    stars = iter([DOTS["magenta"], DOTS["yellow"], DOTS["green"]])
-    out = [f'<g transform="translate({f(x)} {f(y)}) scale({f(k)})" fill="none" stroke="{INK}" '
+    lean = math.tan(math.radians(slant)) * h
+    out = [f'<g transform="translate({f(x + lean)} {f(y)}) skewX({f(-slant)}) scale({f(k)})" fill="none" stroke="{INK}" '
            f'stroke-width="{f(stroke / k)}" stroke-linejoin="miter" stroke-linecap="square">']
     cx = 0.0
     for ch in "ASTRAEA":
         w, d = glyphs[ch]
         out.append(f'<path transform="translate({f(cx)} 0)" d="{d}"/>')
-        if ch == "A":
-            out.append(f'<circle cx="{f(cx + 15)}" cy="23" r="{f(2.9 / k)}" fill="{next(stars)}" stroke="none"/>')
         cx += w + track / k
     out.append("</g>")
     return "".join(out), (cx - track / k) * k
@@ -97,103 +83,177 @@ def wordmark(x, y, h=34.0, stroke=3.0, track=13.0):
 
 # ---------------------------------------------------------------- hero
 
+def hashes(n, seed):
+    """Hex lines that look like what the sphere holds: ledger and object hashes."""
+    import hashlib
+    return [hashlib.sha512(f"{seed}{i}".encode()).hexdigest()[:64].upper() for i in range(n)]
+
+
 def hero():
     W, H = 1200, 480
-    cx, cy, R = 905, 525, 300
-    pole_y = cy - R
-    n = 18
-    period = 36  # seconds for half a turn
+    cx, cy, R = 930, 236, 188
+
+    # The sphere: a shaded body, a slowly turning grid, and what it stores
+    # inside: hash lines scrolling up, a Merkle tree whose leaves prove up to
+    # the root, and a chain of ledger blocks orbiting the core.
+    period = 40
     steps = 24
     rx_vals = ";".join(f(R * abs(math.cos(math.pi * i / steps))) for i in range(steps + 1))
+    n = 12
     meridians = []
     for k in range(n):
-        begin = -period * k / n
         anim = (f'<animate attributeName="rx" values="{rx_vals}" dur="{period}s" '
-                f'begin="{f(begin)}s" repeatCount="indefinite"/>')
+                f'begin="{f(-period * k / n)}s" repeatCount="indefinite"/>')
         rx0 = R * abs(math.cos(math.pi * k / n))
-        meridians.append(
-            f'<ellipse cx="{cx}" cy="{cy}" rx="{f(rx0)}" ry="{R}" class="wire">{anim}</ellipse>'
-            f'<ellipse cx="{cx}" cy="{cy}" rx="{f(rx0)}" ry="{R}" class="dots m">{anim}</ellipse>')
+        meridians.append(f'<ellipse cx="{cx}" cy="{cy}" rx="{f(rx0)}" ry="{R}" class="grid dots m">{anim}</ellipse>')
+    parallels = []
+    for lat in (-60, -30, 0, 30, 60):
+        y = cy + R * math.sin(math.radians(lat))
+        rx = R * math.cos(math.radians(lat))
+        parallels.append(f'<ellipse cx="{cx}" cy="{f(y)}" rx="{f(rx)}" ry="{f(rx * 0.16)}" class="grid"/>')
 
-    # Ledgers climbing to the pole along fixed meridians: the network agreeing.
-    pulses = []
-    lanes = [(-0.82, "rose"), (-0.45, "yellow"), (0.0, "ink"), (0.38, "blue"), (0.74, "green"),
-             (-0.62, "violet"), (0.58, "coral")]
-    colours = {"rose": ROSE, "ink": INK, **DOTS}
-    for i, (u, col) in enumerate(lanes):
-        rx = R * abs(u)
-        sx = cx + (rx if u >= 0 else -rx)
-        sweep = 0 if u >= 0 else 1
-        d = f"M{f(sx)} {cy} A{f(rx)} {R} 0 0 {sweep} {cx} {pole_y}" if rx > 1 else f"M{cx} {cy} L{cx} {pole_y}"
-        dur = 4.2
-        begin = i * 0.6
-        pulses.append(
-            f'<circle r="3" fill="{colours[col]}" opacity="0">'
-            f'<animateMotion path="{d}" dur="{dur}s" begin="{f(begin)}s" repeatCount="indefinite" '
-            f'keyPoints="0;1" keyTimes="0;1" calcMode="spline" keySplines=".4 0 .2 1"/>'
-            f'<animate attributeName="opacity" values="0;1;1;0" keyTimes="0;.2;.9;1" dur="{dur}s" '
+    lines = hashes(24, "astraea")
+    step_y = 21
+    block = "".join(
+        f'<text x="{cx - R}" y="{f(cy - R + 14 + i * step_y)}" class="mono hash">{h}</text>'
+        for i, h in enumerate(lines + lines))
+    scroll = (f'<animateTransform attributeName="transform" type="translate" from="0 0" '
+              f'to="0 {-step_y * len(lines)}" dur="60s" repeatCount="indefinite"/>')
+
+    # Merkle tree: 8 leaves, 3 levels, root near the top of the core.
+    top, bottom, spread = cy - 84, cy + 74, 220
+    levels = []
+    for lv in range(4):
+        count = 2 ** (3 - lv)
+        y = bottom - lv * (bottom - top) / 3
+        xs = [cx - spread / 2 + spread * (i + 0.5) / count for i in range(count)]
+        levels.append([(x, y) for x in xs])
+    edges, nodes = [], []
+    for lv in range(3):
+        for i, (x, y) in enumerate(levels[lv]):
+            px, py = levels[lv + 1][i // 2]
+            edges.append(f'<path d="M{f(x)} {f(y)} L{f(px)} {f(py)}" class="edge"/>')
+    for lv, row in enumerate(levels):
+        for x, y in row:
+            r = 4.2 if lv == 3 else 3
+            nodes.append(f'<circle cx="{f(x)}" cy="{f(y)}" r="{r}" fill="{PANEL}" stroke="{INK}" stroke-opacity=".8" stroke-width="1.1"/>')
+    rx_, ry_ = levels[3][0]
+    proofs = []
+    for j, (leaf, col) in enumerate([(1, "yellow"), (6, "magenta"), (3, "blue"), (4, "coral")]):
+        pts, i = [], leaf
+        for lv in range(4):
+            pts.append(levels[lv][i])
+            i //= 2
+        d = "M" + " L".join(f"{f(x)} {f(y)}" for x, y in pts)
+        # Four proofs take turns, one every 2.4 s: each is drawn for the
+        # first quarter of a 9.6 s cycle and hidden for the rest.
+        cyc, begin = 9.6, j * 2.4
+        proofs.append(
+            f'<path d="{d}" fill="none" stroke="{DOTS[col]}" stroke-width="1.6" opacity="0">'
+            f'<animate attributeName="opacity" values="0;.9;.9;0;0" keyTimes="0;.04;.2;.25;1" dur="{cyc}s" '
+            f'begin="{f(begin)}s" repeatCount="indefinite"/></path>'
+            f'<circle r="3.2" fill="{DOTS[col]}" opacity="0">'
+            f'<animateMotion path="{d}" dur="{cyc}s" begin="{f(begin)}s" repeatCount="indefinite" '
+            f'calcMode="spline" keyPoints="0;1;1" keyTimes="0;.25;1" keySplines=".5 0 .3 1;0 0 1 1"/>'
+            f'<animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;.03;.22;.25;1" dur="{cyc}s" '
             f'begin="{f(begin)}s" repeatCount="indefinite"/></circle>')
+    root_ring = "".join(
+        f'<circle cx="{f(rx_)}" cy="{f(ry_)}" r="4" fill="none" stroke="{GREEN}" stroke-width="1.2">'
+        f'<animate attributeName="r" values="4;22" dur="2.4s" begin="{f(b)}s" repeatCount="indefinite"/>'
+        f'<animate attributeName="opacity" values=".9;0" dur="2.4s" begin="{f(b)}s" repeatCount="indefinite"/></circle>'
+        for b in (2.4,))
 
-    rings = "".join(
-        f'<circle cx="{cx}" cy="{pole_y}" r="4" fill="none" stroke="{GREEN}" stroke-width="1.2">'
-        f'<animate attributeName="r" values="3;26" dur="2.1s" begin="{f(b)}s" repeatCount="indefinite"/>'
-        f'<animate attributeName="opacity" values=".9;0" dur="2.1s" begin="{f(b)}s" repeatCount="indefinite"/></circle>'
-        for b in (0, 1.05))
+    # Ledger blocks on a tilted orbit around the core: the chain itself.
+    orx, ory, tilt = R * 0.9, R * 0.2, -20
+    orbit = f"M{f(cx - orx)} {cy} A{f(orx)} {f(ory)} 0 1 1 {f(cx + orx)} {cy} A{f(orx)} {f(ory)} 0 1 1 {f(cx - orx)} {cy}"
+    blocks = []
+    palette = ["green", "yellow", "blue", "magenta", "coral", "violet", "green", "blue"]
+    dur = 28
+    for i, col in enumerate(palette):
+        begin = -dur * i / len(palette)
+        blocks.append(
+            f'<g><rect x="-6.5" y="-6.5" width="13" height="13" rx="2.5" fill="{PANEL}" stroke="{INK}" stroke-opacity=".6" stroke-width="1"/>'
+            f'<rect x="-2.5" y="-2.5" width="5" height="5" rx="1" fill="{DOTS[col]}"/>'
+            f'<animateMotion path="{orbit}" dur="{dur}s" begin="{f(begin)}s" repeatCount="indefinite"/></g>')
 
-    stats = [("History from ledger", "32,571"), ("Confirmed by", "80% of the UNL"), ("Cold storage", "~240 B / tx")]
+    stats = [("History from ledger", "32,571"), ("Confirmed by", "80% of the UNL"), ("Cold storage", "~255 B / tx")]
     stat_svg = []
     for i, (label, value) in enumerate(stats):
         x = 64 + i * 178
-        stat_svg.append(f'<text x="{x}" y="414" class="sans" font-size="13" fill="{MUTED}">{label}</text>'
-                        f'<text x="{x}" y="440" class="sans" font-size="20" fill="{INK}">{value}</text>')
+        stat_svg.append(f'<text x="{x}" y="420" class="sans" font-size="13" fill="{MUTED}">{label}</text>'
+                        f'<text x="{x}" y="446" class="sans" font-size="20" fill="{INK}">{value}</text>')
 
-    mark, _ = wordmark(64, 86)
+    chips = ["Written in Rust", "Clio 2.8 API", "Proofs you check offline", "ISC licensed"]
+    chip_svg, x = [], 64
+    for c in chips:
+        w = 18 + len(c) * 6.9
+        chip_svg.append(f'<rect x="{f(x)}" y="352" width="{f(w)}" height="26" rx="13" fill="none" stroke="{PANEL_EDGE}"/>'
+                        f'<text x="{f(x + w / 2)}" y="369.5" text-anchor="middle" class="sans" font-size="12.5" fill="{INK}" opacity=".85">{c}</text>')
+        x += w + 10
+
+    mark, mark_w = wordmark(64, 70, slant=9)
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-labelledby="t d">
   <title id="t">Astraea by Lending Network</title>
-  <desc id="d">XRPL history you can check yourself. A dotted globe turns slowly while ledgers climb its meridians to the pole, where validators agree on them.</desc>
+  <desc id="d">XRPL history you can check yourself. A sphere holds the history: hash lines scroll inside it, a chain of ledger blocks orbits its core, and leaves of a Merkle tree prove their way up to the root.</desc>
   <style>{STYLE_BASE}
-    .wire {{ fill: none; stroke: url(#globe); stroke-width: .7; opacity: .3; }}
-    .dots {{ fill: none; stroke: url(#globe); stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 0 14; animation: crawl 3.5s linear infinite; }}
-    @keyframes crawl {{ to {{ stroke-dashoffset: -28; }} }}
+    .grid {{ fill: none; stroke: url(#globe); stroke-width: .8; opacity: .32; }}
+    .dots {{ stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 0 12; opacity: .45; animation: crawl 4s linear infinite; }}
+    @keyframes crawl {{ to {{ stroke-dashoffset: -24; }} }}
+    .hash {{ font-size: 11px; letter-spacing: 1.2px; fill: {SAGE}; }}
+    .edge {{ stroke: {SAGE}; stroke-width: 1.1; opacity: .8; }}
   </style>
   <defs>
     <linearGradient id="globe" gradientUnits="userSpaceOnUse" x1="{cx - R}" y1="0" x2="{cx + R}" y2="0">
-      <stop offset=".1" stop-color="{ROSE}"/>
+      <stop offset=".05" stop-color="{ROSE}"/>
       <stop offset=".55" stop-color="{SAGE}"/>
       <stop offset=".95" stop-color="{GREEN}"/>
     </linearGradient>
-    <radialGradient id="glow" cx="{cx}" cy="{pole_y}" r="44" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{GREEN}" stop-opacity=".28"/>
+    <radialGradient id="body" cx="{cx - R * .35}" cy="{cy - R * .4}" r="{R * 1.35}" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17231c"/>
+      <stop offset=".55" stop-color="#0e1411"/>
+      <stop offset="1" stop-color="{BG}"/>
+    </radialGradient>
+    <radialGradient id="halo" cx="{cx}" cy="{cy}" r="{R * 1.25}" gradientUnits="userSpaceOnUse">
+      <stop offset=".78" stop-color="{GREEN}" stop-opacity=".07"/>
       <stop offset="1" stop-color="{GREEN}" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="{BG}" stop-opacity="0"/>
-      <stop offset="1" stop-color="{BG}" stop-opacity="1"/>
+    <radialGradient id="core" cx="{f(rx_)}" cy="{f(ry_)}" r="40" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="{GREEN}" stop-opacity=".25"/>
+      <stop offset="1" stop-color="{GREEN}" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="fadeHash" cx="{cx}" cy="{cy}" r="{R}" gradientUnits="userSpaceOnUse">
+      <stop offset=".2" stop-color="#fff" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="inside"><circle cx="{cx}" cy="{cy}" r="{R - 4}" fill="url(#fadeHash)"/></mask>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="{ROSE}" stop-opacity=".55"/>
+      <stop offset=".5" stop-color="{SAGE}" stop-opacity=".25"/>
+      <stop offset="1" stop-color="{GREEN}" stop-opacity=".6"/>
     </linearGradient>
-    <linearGradient id="side" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="{BG}" stop-opacity="1"/>
-      <stop offset="1" stop-color="{BG}" stop-opacity="0"/>
-    </linearGradient>
-    <clipPath id="card"><rect width="{W}" height="{H}" rx="16"/></clipPath>
   </defs>
   <rect width="{W}" height="{H}" rx="16" fill="{BG}"/>
-  <g clip-path="url(#card)">
-    <g>{''.join(meridians)}</g>
-    <circle cx="{cx}" cy="{pole_y}" r="44" fill="url(#glow)"/>
-    {rings}
-    <g>{''.join(pulses)}</g>
-    <rect x="0" y="{H - 90}" width="{W}" height="90" fill="url(#fade)"/>
-    <rect x="0" y="0" width="600" height="{H}" fill="url(#side)" opacity=".9"/>
-  </g>
   <rect x=".5" y=".5" width="{W - 1}" height="{H - 1}" rx="15.5" fill="none" stroke="{CARD_EDGE}"/>
 
-  {logo_mark(82, 52, 1.3)}
+  <circle cx="{cx}" cy="{cy}" r="{f(R * 1.25)}" fill="url(#halo)"/>
+  <circle cx="{cx}" cy="{cy}" r="{R}" fill="url(#body)"/>
+  <g mask="url(#inside)" opacity=".5"><g>{block}{scroll}</g></g>
+  <g>{''.join(parallels)}{''.join(meridians)}</g>
+  <path d="{orbit}" transform="rotate({tilt} {cx} {cy})" fill="none" stroke="{INK}" stroke-opacity=".14" stroke-dasharray="2 5"/>
+  <circle cx="{f(rx_)}" cy="{f(ry_)}" r="40" fill="url(#core)"/>
+  <g>{''.join(edges)}{''.join(nodes)}</g>
+  {''.join(proofs)}
+  {root_ring}
+  <g transform="rotate({tilt} {cx} {cy})">{''.join(blocks)}</g>
+  <circle cx="{cx}" cy="{cy}" r="{R}" fill="none" stroke="url(#rim)" stroke-width="1.2"/>
+
   {mark}
-  <text x="64" y="144" class="sans" font-size="11" font-weight="500" letter-spacing="3.6" fill="{MUTED}">BY LENDING NETWORK</text>
+  <text x="{f(64 + mark_w)}" y="128" text-anchor="end" class="sans" font-size="14" fill="{MUTED}">by Lending Network</text>
 
   <text x="62" y="222" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">XRPL history</text>
   <text x="62" y="282" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">you can check yourself</text>
-  <text x="64" y="326" class="sans" font-size="16" fill="{MUTED}">The XRPL history server that doesn&#8217;t ask you to trust it.</text>
+  <text x="64" y="322" class="sans" font-size="16" fill="{MUTED}">The XRPL history server that doesn&#8217;t ask you to trust it.</text>
+  {''.join(chip_svg)}
   {''.join(stat_svg)}
 </svg>
 """
