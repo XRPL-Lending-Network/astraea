@@ -489,6 +489,7 @@ async fn sample(s: Shared) {
             m.api.subscribers = [
                 ("ledger", h.ledger),
                 ("transactions", h.transactions),
+                ("book_changes", h.book_changes),
                 ("accounts", h.account_sessions),
             ]
             .into_iter()

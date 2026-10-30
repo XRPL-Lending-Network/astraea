@@ -448,6 +448,7 @@ impl Engine {
             "account_offers" => self.account_offers(p),
             "mpt_holders" => self.mpt_holders(p),
             "ledger_data" => self.ledger_data(p, api),
+            "book_changes" => self.book_changes(p),
             "proof_ledger" => self.proof_ledger(p),
             "proof_tx" => self.proof_tx(p),
             "proof_entry" => self.proof_entry(p),
@@ -607,6 +608,23 @@ impl Engine {
         m.insert("ledger_index".into(), json!(seq));
         m.insert("validated".into(), json!(true));
         m.insert("ledger".into(), Value::Object(header));
+        Ok(m)
+    }
+
+    fn book_changes(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
+        let seq = self.resolve(p)?;
+        let (_, h) = self.header(seq)?;
+        let l = self.ledger(seq)?;
+        let mut m = Map::new();
+        m.insert("type".into(), json!("bookChanges"));
+        m.insert("ledger_hash".into(), json!(hex::encode_upper(h.hash())));
+        m.insert("ledger_index".into(), json!(seq));
+        m.insert("ledger_time".into(), json!(h.close_time));
+        m.insert("validated".into(), json!(true));
+        m.insert(
+            "changes".into(),
+            Value::Array(crate::bookchanges::compute(&l.transactions)),
+        );
         Ok(m)
     }
 

@@ -4,6 +4,7 @@
 //! stores the header, transactions with metadata, and state changes.
 //!
 //! - `api`: Clio-compatible API (ledger, tx, account_tx and others);
+//! - `bookchanges`: `book_changes`, order book volumes and rates of a ledger;
 //! - `proof`: Proof API, evidence bundles for a ledger, transaction or object;
 //! - `selector`: the object key from `ledger_entry` params (all selectors of Clio 2.8);
 //! - `server`: HTTP JSON-RPC and WebSocket for `api`;
@@ -28,6 +29,7 @@
 
 pub mod api;
 pub mod blocks;
+pub mod bookchanges;
 pub mod cold;
 pub mod coldindex;
 pub mod confirm;

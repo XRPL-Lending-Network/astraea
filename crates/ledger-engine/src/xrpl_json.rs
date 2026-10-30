@@ -266,23 +266,26 @@ pub fn amount(v: &[u8]) -> Value {
 pub fn number(v: &[u8]) -> String {
     let m = i64::from_be_bytes(v[..8].try_into().unwrap_or_default());
     let e = i32::from_be_bytes(v[8..12].try_into().unwrap_or_default());
-    if m == 0 {
+    number_text(m < 0, u128::from(m.unsigned_abs()), e, 15)
+}
+
+/// `to_string(Number)` in xrpld for a mantissa range of [10^log, 10^(log+1)):
+/// 15 is the small range, 18 the large one.
+pub(crate) fn number_text(negative: bool, mantissa: u128, exponent: i32, range_log: i32) -> String {
+    if mantissa == 0 {
         return "0".into();
     }
-    let negative = m < 0;
-    let mut mantissa = u128::from(m.unsigned_abs());
-    let mut exponent = e;
-    const MIN: u128 = 1_000_000_000_000_000;
-    const MAX: u128 = 9_999_999_999_999_999;
-    while mantissa < MIN {
+    let min = 10u128.pow(range_log as u32);
+    let max = min * 10 - 1;
+    let (mut mantissa, mut exponent) = (mantissa, exponent);
+    while mantissa < min {
         mantissa *= 10;
         exponent -= 1;
     }
-    while mantissa > MAX {
+    while mantissa > max {
         mantissa /= 10;
         exponent += 1;
     }
-    let range_log: i32 = 15;
     let mut ret = String::new();
     if negative {
         ret.push('-');

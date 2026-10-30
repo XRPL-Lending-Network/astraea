@@ -1,12 +1,12 @@
 //! WebSocket subscriptions, as in Clio 2.8: the `ledger` stream
-//! (ledgerClosed), the `transactions` stream, and per-account transactions via `accounts`.
-//! Other Clio streams (validations, manifests, book_changes, *_proposed,
-//! books) return notSupported: a subscription that never sends messages would
-//! mislead the client.
+//! (ledgerClosed), the `transactions` stream, the `book_changes` stream, and
+//! per-account transactions via `accounts`. Other Clio streams (validations,
+//! manifests, *_proposed, books) return notSupported: a subscription that never
+//! sends messages would mislead the client.
 //!
 //! Every ledger validated by a quorum (the upper bound of
 //! `range`) is published in order: ledgerClosed first, then transactions by
-//! TransactionIndex. An account gets a transaction if it is among the affected accounts (the
+//! TransactionIndex, then bookChanges. An account gets a transaction if it is among the affected accounts (the
 //! same set as account_tx). The message format follows the api_version of the session's
 //! latest subscription. The session queue is bounded, like
 //! `ws_max_sending_queue_size` in Clio: a session that can't keep up is disconnected.
@@ -51,6 +51,7 @@ struct Sub {
     /// with no repeats and no going backwards when publishing catches up on a batch.
     ledger_after: u32,
     transactions: bool,
+    book_changes: bool,
     accounts: HashSet<AccountId>,
     out: mpsc::Sender<String>,
 }
@@ -69,6 +70,7 @@ pub struct Hub {
 pub struct HubStats {
     pub ledger: u64,
     pub transactions: u64,
+    pub book_changes: u64,
     /// Sessions subscribed to at least one account, and accounts over all of them.
     pub account_sessions: u64,
     pub accounts: u64,
@@ -80,6 +82,7 @@ pub struct HubStats {
 pub struct Request {
     pub ledger: bool,
     pub transactions: bool,
+    pub book_changes: bool,
     pub accounts: Vec<AccountId>,
 }
 
@@ -102,10 +105,10 @@ pub fn parse(p: &Map<String, Value>) -> Result<Request, RpcError> {
                     None => return Err(invalid_params("streamNotString")),
                     Some("ledger") => r.ledger = true,
                     Some("transactions") => r.transactions = true,
-                    Some(
-                        s
-                        @ ("validations" | "manifests" | "book_changes" | "transactions_proposed"),
-                    ) => return Err(not_supported(s)),
+                    Some("book_changes") => r.book_changes = true,
+                    Some(s @ ("validations" | "manifests" | "transactions_proposed")) => {
+                        return Err(not_supported(s));
+                    }
                     Some(_) => return Err(rpc_err("malformedStream", 71, "Stream malformed.")),
                 }
             }
@@ -153,6 +156,7 @@ impl Hub {
                 ledger: false,
                 ledger_after: 0,
                 transactions: false,
+                book_changes: false,
                 accounts: HashSet::new(),
                 out,
             },
@@ -173,6 +177,7 @@ impl Hub {
         for s in g.values() {
             st.ledger += u64::from(s.ledger);
             st.transactions += u64::from(s.transactions);
+            st.book_changes += u64::from(s.book_changes);
             st.account_sessions += u64::from(!s.accounts.is_empty());
             st.accounts += s.accounts.len() as u64;
         }
@@ -188,6 +193,7 @@ impl Hub {
             }
             s.ledger |= r.ledger;
             s.transactions |= r.transactions;
+            s.book_changes |= r.book_changes;
             s.accounts.extend(r.accounts.iter().copied());
         }
     }
@@ -196,6 +202,7 @@ impl Hub {
         if let Some(s) = self.lock().get_mut(&id) {
             s.ledger &= !r.ledger;
             s.transactions &= !r.transactions;
+            s.book_changes &= !r.book_changes;
             for a in &r.accounts {
                 s.accounts.remove(a);
             }
@@ -209,7 +216,7 @@ impl Hub {
     fn wants_anything(&self) -> bool {
         self.lock()
             .values()
-            .any(|s| s.ledger || s.transactions || !s.accounts.is_empty())
+            .any(|s| s.ledger || s.transactions || s.book_changes || !s.accounts.is_empty())
     }
 
     /// Sends to the session queue; if the queue is full or closed, the session
@@ -391,31 +398,77 @@ impl Engine {
     }
 }
 
+/// What one session gets for a ledger.
+struct Wants {
+    id: u64,
+    api: u32,
+    ledger: bool,
+    transactions: bool,
+    book_changes: bool,
+    accounts: HashSet<AccountId>,
+}
+
 /// Messages for ledger `seq` to subscribers.
 fn publish(engine: &Engine, hub: &Hub, seq: u32) -> Res<()> {
     // Snapshot of subscriptions: who gets what.
-    let subs: Vec<(u64, u32, bool, bool, HashSet<AccountId>)> = hub
+    let subs: Vec<Wants> = hub
         .lock()
         .iter()
-        .map(|(id, s)| {
-            let ledger = s.ledger && seq > s.ledger_after;
-            (*id, s.api, ledger, s.transactions, s.accounts.clone())
+        .map(|(id, s)| Wants {
+            id: *id,
+            api: s.api,
+            ledger: s.ledger && seq > s.ledger_after,
+            transactions: s.transactions,
+            book_changes: s.book_changes,
+            accounts: s.accounts.clone(),
         })
         .collect();
     let l = engine.ledger(seq)?;
-    if subs.iter().any(|s| s.2) {
+    if subs.iter().any(|s| s.ledger) {
         let msg = Value::Object(engine.ledger_stream(seq, Some(l.transactions.len()))?).to_string();
         let targets: Vec<(u64, String)> = subs
             .iter()
-            .filter(|s| s.2)
-            .map(|s| (s.0, msg.clone()))
+            .filter(|s| s.ledger)
+            .map(|s| (s.id, msg.clone()))
             .collect();
         hub.deliver(&targets);
     }
-    if !subs.iter().any(|s| s.3 || !s.4.is_empty()) {
-        return Ok(());
-    }
     let (_, h) = engine.header(seq)?;
+    if subs
+        .iter()
+        .any(|s| s.transactions || !s.accounts.is_empty())
+    {
+        publish_transactions(engine, hub, seq, &h, &l, &subs);
+    }
+    if subs.iter().any(|s| s.book_changes) {
+        let mut m = Map::new();
+        m.insert("type".into(), json!("bookChanges"));
+        m.insert("ledger_index".into(), json!(seq));
+        m.insert("ledger_hash".into(), json!(hex::encode_upper(h.hash())));
+        m.insert("ledger_time".into(), json!(h.close_time));
+        m.insert(
+            "changes".into(),
+            Value::Array(crate::bookchanges::compute(&l.transactions)),
+        );
+        let msg = Value::Object(m).to_string();
+        let targets: Vec<(u64, String)> = subs
+            .iter()
+            .filter(|s| s.book_changes)
+            .map(|s| (s.id, msg.clone()))
+            .collect();
+        hub.deliver(&targets);
+    }
+    Ok(())
+}
+
+fn publish_transactions(
+    engine: &Engine,
+    hub: &Hub,
+    seq: u32,
+    h: &LedgerHeader,
+    l: &crate::ledger::Ledger,
+    subs: &[Wants],
+) {
     let mut txs = Vec::with_capacity(l.transactions.len());
     // A transaction that fails to parse is skipped on its own; subscribers still
     // get the rest of the ledger's transactions.
@@ -427,9 +480,9 @@ fn publish(engine: &Engine, hub: &Hub, seq: u32) -> Res<()> {
     }
     txs.sort_by_key(|t| t.0);
     for (_, tx, meta, accounts) in txs {
-        let to: Vec<&(u64, u32, bool, bool, HashSet<AccountId>)> = subs
+        let to: Vec<&Wants> = subs
             .iter()
-            .filter(|s| s.3 || accounts.iter().any(|a| s.4.contains(a)))
+            .filter(|s| s.transactions || accounts.iter().any(|a| s.accounts.contains(a)))
             .collect();
         if to.is_empty() {
             continue;
@@ -437,12 +490,12 @@ fn publish(engine: &Engine, hub: &Hub, seq: u32) -> Res<()> {
         let mut by_api: HashMap<u32, String> = HashMap::new();
         let mut targets = Vec::with_capacity(to.len());
         for s in to {
-            let msg = match by_api.get(&s.1) {
+            let msg = match by_api.get(&s.api) {
                 Some(m) => m.clone(),
-                None => match engine.tx_stream(seq, &h, tx, meta, s.1) {
+                None => match engine.tx_stream(seq, h, tx, meta, s.api) {
                     Ok(m) => {
                         let m = Value::Object(m).to_string();
-                        by_api.insert(s.1, m.clone());
+                        by_api.insert(s.api, m.clone());
                         m
                     }
                     Err(e) => {
@@ -454,11 +507,10 @@ fn publish(engine: &Engine, hub: &Hub, seq: u32) -> Res<()> {
                     }
                 },
             };
-            targets.push((s.0, msg));
+            targets.push((s.id, msg));
         }
         hub.deliver(&targets);
     }
-    Ok(())
 }
 
 /// Publishes validated ledgers for the life of the process. With no subscribers
@@ -532,11 +584,11 @@ mod tests {
         );
         assert_eq!(err(json!({"books": []})).error, "notSupported");
         let r = parse(&p(json!({
-            "streams": ["ledger", "transactions"],
+            "streams": ["ledger", "transactions", "book_changes"],
             "accounts": ["rrrrrrrrrrrrrrrrrrrrrhoLvTp"],
         })))
         .unwrap();
-        assert!(r.ledger && r.transactions);
+        assert!(r.ledger && r.transactions && r.book_changes);
         assert_eq!(r.accounts, vec![[0u8; 20]]);
         assert_eq!(parse(&Map::new()).unwrap(), Request::default());
     }

@@ -23,6 +23,7 @@ Ledgers outside the range get `lgrNotFound`, as on any server that doesn't have 
 | `ledger` | by `ledger_index` or `ledger_hash`, with `transactions`, `expand` and `binary` |
 | `tx` | by hash or by `ctid`; `binary` supported |
 | `account_tx` | full range, both directions, markers; `limit` defaults to 200, at most 1000 |
+| `book_changes` | by `ledger_index` or `ledger_hash`, over the full range; volumes and rates match xrpld to the last digit |
 
 These work over the whole range, hot and cold. Paging with markers is continuous across the hot/cold boundary and between cold partitions.
 
@@ -64,7 +65,7 @@ Nothing else is forwarded, whatever its parameters say. Transaction submission a
 
 ### Subscriptions (WebSocket)
 
-`subscribe` and `unsubscribe` support the `ledger` and `transactions` streams and `accounts`. The streams Clio offers that Astraea doesn't (`validations`, `manifests`, `book_changes`, `transactions_proposed`, `accounts_proposed`, `books`) return `notSupported` instead of a silent subscription.
+`subscribe` and `unsubscribe` support the `ledger`, `transactions` and `book_changes` streams and `accounts`. A ledger's `bookChanges` message comes after its transactions, as in Clio. The streams Clio offers that Astraea doesn't (`validations`, `manifests`, `transactions_proposed`, `accounts_proposed`, `books`) return `notSupported` instead of a silent subscription.
 
 - Each confirmed ledger is published once, in order: `ledgerClosed` first, then its transactions by `TransactionIndex`.
 - After subscribing to `ledger`, the first `ledgerClosed` is for the ledger right after the one in the subscribe response.

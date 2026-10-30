@@ -29,7 +29,7 @@ Released.
 ## Later
 
 - State at any historical ledger, not only from the snapshot onward.
-- More of Clio's surface: NFT methods (`nft_info`, `nft_history`, `nfts_by_issuer`), `book_changes`, and the `book_changes` and `validations` streams.
+- More of Clio's surface: NFT methods (`nft_info`, `nft_history`, `nfts_by_issuer`) and the `validations` stream.
 - Smaller cold history (a target of under 217 bytes per transaction across all of history).
 - Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
 - Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.
