@@ -7,6 +7,7 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 repository = "https://github.com/XRPL-Lending-Network/astraea"
+license = "ISC"
 # No crate in this workspace goes to crates.io. Publishing anything is a
 # separate, deliberate decision, and this line keeps it from happening by
 # accident: `cargo publish` will refuse.
@@ -19,7 +20,7 @@ sha2 = "0.10"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-zstd = "0.13"
+zstd = "0.14.3"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time", "signal", "net"] }
 tokio-tungstenite = "0.28"
@@ -28,7 +29,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
-k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+k256 = { version = "0.14", default-features = false, features = ["ecdsa", "std"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 ureq = "3"
 

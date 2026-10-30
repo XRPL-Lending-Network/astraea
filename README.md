@@ -98,4 +98,6 @@ Older ledgers carry far fewer transactions, so the remaining 86 million ledgers 
 
 ## License
 
-No license has been chosen yet. Until one is added, all rights are reserved.
+ISC, the same license as xrpld: see [LICENSE.md](LICENSE.md). The xrpld gRPC definitions in `crates/ledger-engine/proto` keep their own copy of the xrpld license.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).

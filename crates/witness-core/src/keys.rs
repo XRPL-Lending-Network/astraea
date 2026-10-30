@@ -77,7 +77,9 @@ pub fn verify(
                 k256::ecdsa::VerifyingKey::from_sec1_bytes(pk).map_err(|_| VerifyError::BadKey)?;
             let mut s = k256::ecdsa::Signature::from_der(sig)
                 .map_err(|_| VerifyError::BadSignatureEncoding)?;
-            if let Some(low) = s.normalize_s() {
+            // A high S is the malleable twin of a low one; `require_canonical` refuses it.
+            let low = s.normalize_s();
+            if low != s {
                 if require_canonical {
                     return Err(VerifyError::NotCanonical);
                 }

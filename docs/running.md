@@ -62,7 +62,7 @@ astraea-ingest \
 
 Before the first start, take a snapshot of the full ledger state with `astraea-snapshot` (it downloads every object over gRPC and refuses the result unless the rebuilt state tree matches the header's `account_hash`) and load it with `astraea-state --db <data-dir>/state load <snapshot>`. From then on `astraea-ingest` follows the network. History before the snapshot comes from the cold store.
 
-Astraea doesn't terminate TLS or limit request rates on its own. Put it behind a reverse proxy for anything public.
+Astraea serves at most 32 requests at once, 4 of them proofs, and gives each request 10 seconds. It doesn't terminate TLS or limit request rates per client: put it behind a reverse proxy for anything public.
 
 ## Loading older history
 

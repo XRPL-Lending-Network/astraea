@@ -33,4 +33,3 @@ Released.
 - Smaller cold history (a target of under 217 bytes per transaction across all of history).
 - Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
 - Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.
-- A license and contribution guide before the repository opens.

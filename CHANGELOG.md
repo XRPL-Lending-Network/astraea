@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Licensed under ISC, like xrpld. `SECURITY.md` says how to report a vulnerability, `CONTRIBUTING.md` how to contribute.
+- `cargo deny check` in CI: permissive licenses only, crates.io only, no known RustSec advisories. It found four: three in zstd (RUSTSEC-2026-0391, -0398, -0403), fixed by moving to zstd 0.14.3, and one in crypto-bigint (RUSTSEC-2026-0387), fixed by moving to k256 0.14. The new k256 returns the normalized signature instead of an option; a high-S signature is still refused where canonical signatures are required.
 - `ledger_entry` and `proof_entry` take every selector of Clio 2.8. New: `amm`, `bridge`, `credential`, `delegate`, `did`, `loan`, `loan_broker`, `mpt_issuance`, `mptoken`, `oracle`, `permissioned_domain`, `vault`, the two cross-chain claim IDs, `deposit_preauth` by `authorized_credentials`, and a hex key under `amendments`, `fee`, `hashes`, `nft_offer`, `nunl` or `signer_list`. Keys are derived as in xrpld and match the keys xrpld 3.4.1 returns for the same params. Errors use Clio's codes (`malformedOwner`, `malformedAddress`, `malformedDocumentID`, `malformedAuthorizedCredentials`).
 - `ledger_entry` takes `include_deleted`, as in Clio.
 - Each request has 10 seconds. Handlers run on blocking threads that cannot be stopped from outside, so the loops whose length the client controls check a per-thread deadline, and a request past it ends with `tooBusy` and frees its slot.
