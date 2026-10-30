@@ -56,6 +56,9 @@ pub(crate) fn lgr_not_found() -> RpcError {
 }
 
 pub(crate) fn internal(e: String) -> RpcError {
+    if e == crate::limits::EXCEEDED {
+        return crate::limits::exceeded();
+    }
     rpc_err("internal", 73, e)
 }
 
@@ -570,6 +573,7 @@ impl Engine {
             txs.sort_by(|a, b| a.0.cmp(&b.0));
             let mut out = Vec::with_capacity(txs.len());
             for (hash, tx, meta) in txs {
+                crate::limits::check_rpc()?;
                 if !as_bool(p.get("expand")) {
                     out.push(json!(hash));
                     continue;
@@ -934,6 +938,7 @@ impl Engine {
         let mut out = Vec::with_capacity(page.transactions.len());
         let mut cache: Option<(u32, Ledger)> = None;
         for t in &page.transactions {
+            crate::limits::check_rpc()?;
             if cache.as_ref().is_none_or(|(s, _)| *s != t.at.ledger) {
                 let l = match cold.remove(&t.at.ledger) {
                     Some(l) => l,

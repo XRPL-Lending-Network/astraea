@@ -9,6 +9,7 @@
 //! - `selector`: the object key from `ledger_entry` params (all selectors of Clio 2.8);
 //! - `server`: HTTP JSON-RPC and WebSocket for `api`;
 //! - `source`: xrpld gRPC client (same as Clio: `GetLedger` with objects);
+//! - `limits`: the time limit of one request;
 //! - `ledger`: a whole ledger, its verification and serialization for the log;
 //! - `blocks`: block storage with random access by ledger;
 //! - `confirm`: confirmation of ledgers by a quorum of UNL validators;
@@ -38,6 +39,7 @@ pub mod forward;
 pub mod history;
 pub mod index;
 pub mod ledger;
+pub mod limits;
 pub mod log;
 pub mod metrics;
 pub mod owned;

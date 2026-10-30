@@ -9,6 +9,7 @@
 //! Requests are served on a blocking task pool (fjall and zstd are synchronous),
 //! at most `MAX_INFLIGHT` at a time; proof bundles have their own
 //! budget, `MAX_PROOFS`, and no queue: when it is full they are refused with `tooBusy`.
+//! Each request has `REQUEST_LIMIT` to finish (`limits`), then ends with `tooBusy`.
 //!
 //! subscribe and unsubscribe work only over WebSocket; `subs` keeps the subscriptions.
 //! A session interleaves responses to requests with messages from its queue.
@@ -39,6 +40,9 @@ use crate::subs::{self, Hub};
 const MAX_INFLIGHT: usize = 32;
 /// Proof bundles are expensive to build: at most this many at a time.
 const MAX_PROOFS: usize = 4;
+/// How long one request may run (see `limits`). Real requests take well under
+/// a second; the slowest, a full `ledger_data` page, about 0.7 s.
+const REQUEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Built bundles per ledger and transaction kept in memory; they never change.
 const PROOF_CACHE: usize = 128;
 
@@ -232,15 +236,18 @@ async fn call_own(
     }
     let engine = s.engine.clone();
     let name = method.clone();
-    let result = tokio::task::spawn_blocking(move || engine.handle(&method, &params))
-        .await
-        .unwrap_or_else(|e| {
-            Err(RpcError {
-                error: "internal",
-                code: 73,
-                message: e.to_string(),
-            })
-        });
+    let result = tokio::task::spawn_blocking(move || {
+        let _limit = crate::limits::start(REQUEST_LIMIT);
+        engine.handle(&method, &params)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        Err(RpcError {
+            error: "internal",
+            code: 73,
+            message: e.to_string(),
+        })
+    });
     if is_proof
         && let Ok(r) = &result
         && let Some(by) = r

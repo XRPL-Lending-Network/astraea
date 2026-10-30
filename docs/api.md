@@ -73,6 +73,10 @@ Nothing else is forwarded, whatever its parameters say. Transaction submission a
 - One subscribe can name at most 10,000 accounts.
 - A session that falls 1500 messages behind is disconnected, like Clio's `ws_max_sending_queue_size`.
 
+## Limits
+
+Each request has 10 seconds. The loops whose length depends on the request (owner directory pages, `ledger_data` objects, cold index partitions, the transactions of a page or a ledger) check the time, and a request past it ends with `tooBusy` instead of holding one of the request slots. On real traffic requests take well under a second; the slowest, a full binary `ledger_data` page, about 0.7 s.
+
 ## Proofs
 
 | Method | Parameters | Proves |

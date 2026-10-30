@@ -4,6 +4,7 @@
 
 - `ledger_entry` and `proof_entry` take every selector of Clio 2.8. New: `amm`, `bridge`, `credential`, `delegate`, `did`, `loan`, `loan_broker`, `mpt_issuance`, `mptoken`, `oracle`, `permissioned_domain`, `vault`, the two cross-chain claim IDs, `deposit_preauth` by `authorized_credentials`, and a hex key under `amendments`, `fee`, `hashes`, `nft_offer`, `nunl` or `signer_list`. Keys are derived as in xrpld and match the keys xrpld 3.4.1 returns for the same params. Errors use Clio's codes (`malformedOwner`, `malformedAddress`, `malformedDocumentID`, `malformedAuthorizedCredentials`).
 - `ledger_entry` takes `include_deleted`, as in Clio.
+- Each request has 10 seconds. Handlers run on blocking threads that cannot be stopped from outside, so the loops whose length the client controls check a per-thread deadline, and a request past it ends with `tooBusy` and frees its slot.
 - `book_changes` and the `book_changes` stream. Rates and volumes follow xrpld's amount arithmetic (16-digit division, sums through `Number`, rounding to nearest with ties to even) and matched xrpld 3.4.1 on all 5889 order books in 4464 random mainnet ledgers, 1101 of them with several crossings.
 
 ## 0.2.0

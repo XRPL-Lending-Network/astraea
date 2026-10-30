@@ -336,6 +336,7 @@ impl ColdIndexes {
             if out.len() >= limit {
                 break;
             }
+            crate::limits::check()?;
             let a = lo.max(TxPosition {
                 ledger: p.first,
                 index: 0,

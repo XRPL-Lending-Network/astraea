@@ -310,6 +310,7 @@ impl Engine {
         }
         let mut visited = std::collections::HashSet::new();
         loop {
+            crate::limits::check_rpc()?;
             let k = dir_page_key(&root, page);
             if !visited.insert(page) {
                 return Err(corrupt(&k, "owner directory pages form a cycle"));
@@ -383,6 +384,7 @@ impl Engine {
         };
         let mut count = 0;
         loop {
+            crate::limits::check_rpc()?;
             let node = xrpl_json::ledger_entry(&current, &data).map_err(internal)?;
             let previous = h256(&node, "PreviousPageMin");
             visit(&current, &data)?;
@@ -623,6 +625,7 @@ impl Engine {
         let mut last = None;
         let mut count = 0;
         for item in self.state.objects_page(seq, marker.as_ref()) {
+            crate::limits::check_rpc()?;
             let (k, d) = item.map_err(internal)?;
             count += 1;
             last = Some(k);
