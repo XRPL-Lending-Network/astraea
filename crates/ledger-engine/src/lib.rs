@@ -5,6 +5,7 @@
 //!
 //! - `api`: Clio-compatible API (ledger, tx, account_tx and others);
 //! - `bookchanges`: `book_changes`, order book volumes and rates of a ledger;
+//! - `nft`: `account_nfts`, `nft_buy_offers`, `nft_sell_offers` from the state;
 //! - `proof`: Proof API, evidence bundles for a ledger, transaction or object;
 //! - `selector`: the object key from `ledger_entry` params (all selectors of Clio 2.8);
 //! - `server`: HTTP JSON-RPC and WebSocket for `api`;
@@ -42,6 +43,7 @@ pub mod ledger;
 pub mod limits;
 pub mod log;
 pub mod metrics;
+pub mod nft;
 pub mod owned;
 pub mod proof;
 mod selector;

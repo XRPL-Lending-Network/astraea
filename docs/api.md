@@ -36,6 +36,8 @@ These work over the whole range, hot and cold. Paging with markers is continuous
 | `ledger_entry` | every selector of Clio 2.8: `index`, `account_root`, `amendments`, `amm`, `bridge` with `bridge_account`, `check`, `credential`, `delegate`, `deposit_preauth` (with `authorized` or `authorized_credentials`), `did`, `directory`, `escrow`, `fee`, `hashes`, `loan`, `loan_broker`, `mpt_issuance`, `mptoken`, `nft_offer`, `nft_page`, `nunl`, `offer`, `oracle`, `payment_channel`, `permissioned_domain`, `ripple_state`, `signer_list`, `ticket`, `vault`, `xchain_owned_claim_id`, `xchain_owned_create_account_claim_id`. A hex string in any of them is the object key, and the object must be of that type. `include_deleted` returns a deleted object as it was before the deleting ledger, with `deleted_ledger_index` |
 | `ledger_data` | up to 256 objects per page in JSON, 2048 in binary |
 | `mpt_holders` | as in Clio |
+| `account_nfts` | as in Clio: `limit` counts NFT pages (20 to 400, default 100), and the marker is the key of the next page |
+| `nft_buy_offers`, `nft_sell_offers` | `limit` 50 to 500, default 250; the marker is the first offer of the next page |
 
 State exists from the hot store's snapshot onward. A state query for an older ledger returns `lgrNotFound`.
 

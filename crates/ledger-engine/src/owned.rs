@@ -26,6 +26,8 @@ const DATA_LIMIT_JSON: u32 = 256;
 const DATA_LIMIT_BINARY: u32 = 2048;
 /// What to do with an account object during the walk: key and object.
 type Visit<'a> = dyn FnMut(&[u8; 32], &[u8]) -> Res<()> + 'a;
+/// Entry keys of a directory walk, and the key and page number to continue from.
+pub(crate) type DirWalk = (Vec<[u8; 32]>, Option<([u8; 32], u32)>);
 
 /// Clio's mpt_holders limit: default and maximum.
 const MPT_LIMIT_DEFAULT: u64 = 50;
@@ -148,7 +150,7 @@ fn cursor_text(key: &[u8; 32], hint: u32) -> String {
     format!("{},{hint}", hex::encode_upper(key))
 }
 
-fn h256(node: &Map<String, Value>, field: &str) -> [u8; 32] {
+pub(crate) fn h256(node: &Map<String, Value>, field: &str) -> [u8; 32] {
     node.get(field)
         .and_then(Value::as_str)
         .and_then(|s| hex::decode(s).ok())
@@ -188,7 +190,7 @@ fn dir_page(key: &[u8; 32], data: &[u8]) -> Res<(Vec<[u8; 32]>, u64)> {
 
 /// A broken required link or field in the state: an error with the key,
 /// not a truncated "successful" response.
-fn corrupt(key: &[u8; 32], what: &str) -> RpcError {
+pub(crate) fn corrupt(key: &[u8; 32], what: &str) -> RpcError {
     internal(format!("corrupt_state: {what}: {}", hex::encode_upper(key)))
 }
 
@@ -250,12 +252,12 @@ fn quality_text(book: &[u8; 32]) -> String {
 }
 
 impl Engine {
-    fn fetch(&self, key: &[u8; 32], seq: u32) -> Res<Option<Vec<u8>>> {
+    pub(crate) fn fetch(&self, key: &[u8; 32], seq: u32) -> Res<Option<Vec<u8>>> {
         self.state.get(key, seq).map_err(internal)
     }
 
     /// Account, ledger and request header; if the account doesn't exist, actNotFound.
-    fn owner_of(&self, p: &Map<String, Value>) -> Res<([u8; 20], u32, [u8; 32])> {
+    pub(crate) fn owner_of(&self, p: &Map<String, Value>) -> Res<([u8; 20], u32, [u8; 32])> {
         let a = account_id(
             p.get("account")
                 .ok_or_else(|| invalid_params("Required field 'account' missing"))?,
@@ -294,6 +296,28 @@ impl Engine {
         }
 
         let root = keylet(b'O', &[account]);
+        let (keys, next_cursor) = self.dir_walk(&root, seq, limit, marker, hint)?;
+        let objects = self.state.get_many(&keys, seq).map_err(internal)?;
+        for (key, data) in keys.iter().zip(objects) {
+            let data = data.ok_or_else(|| corrupt(key, "object from the directory is missing"))?;
+            visit(key, &data)?;
+        }
+        Ok(next_cursor.map(|(k, n)| cursor_text(&k, n)))
+    }
+
+    /// Clio's `traverseOwnedNodes` over the directory at `root`: up to `limit`
+    /// entry keys after `marker` (from the root when it is zero; otherwise
+    /// from page `hint`, which must hold it), and the cursor to continue
+    /// from if the entries ran out before the directory did.
+    pub(crate) fn dir_walk(
+        &self,
+        root: &[u8; 32],
+        seq: u32,
+        mut limit: u32,
+        marker: [u8; 32],
+        hint: u32,
+    ) -> Res<DirWalk> {
+        let root = *root;
         let mut keys = Vec::new();
         // As in Clio: without a key in marker the walk starts at the directory root, and the
         // page number from marker only carries over into the next marker.
@@ -339,7 +363,7 @@ impl Engine {
                 }
             }
             if limit == 0 {
-                next_cursor = keys.last().map(|k| cursor_text(k, number));
+                next_cursor = keys.last().map(|k| (*k, number));
                 break;
             }
             if next == 0 {
@@ -349,13 +373,7 @@ impl Engine {
             // Clio stores the page number in u32.
             number = next as u32;
         }
-        let objects = self.state.get_many(&keys, seq).map_err(internal)?;
-        for (key, data) in keys.iter().zip(objects) {
-            let data =
-                data.ok_or_else(|| corrupt(key, "object from the owner directory is missing"))?;
-            visit(key, &data)?;
-        }
-        Ok(next_cursor)
+        Ok((keys, next_cursor))
     }
 
     /// NFT pages from last to first; returns the key of the next

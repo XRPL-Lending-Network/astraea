@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `account_nfts`, `nft_buy_offers` and `nft_sell_offers` on validated ledgers, from the state, as in Clio. Before, they worked only for the open ledger, through the node. On one mainnet ledger they returned the same tokens and offers as xrpld 3.4.1 for 39 accounts and 372 tokens from recent NFT transactions, and for the largest holders among 965 accounts, up to 18,607 tokens; offer pages matched xrpld's page for page.
 - Licensed under ISC, like xrpld. `SECURITY.md` says how to report a vulnerability, `CONTRIBUTING.md` how to contribute.
 - `cargo deny check` in CI: permissive licenses only, crates.io only, no known RustSec advisories. It found four: three in zstd (RUSTSEC-2026-0391, -0398, -0403), fixed by moving to zstd 0.14.3, and one in crypto-bigint (RUSTSEC-2026-0387), fixed by moving to k256 0.14. The new k256 returns the normalized signature instead of an option; a high-S signature is still refused where canonical signatures are required.
 - `ledger_entry` and `proof_entry` take every selector of Clio 2.8. New: `amm`, `bridge`, `credential`, `delegate`, `did`, `loan`, `loan_broker`, `mpt_issuance`, `mptoken`, `oracle`, `permissioned_domain`, `vault`, the two cross-chain claim IDs, `deposit_preauth` by `authorized_credentials`, and a hex key under `amendments`, `fee`, `hashes`, `nft_offer`, `nunl` or `signer_list`. Keys are derived as in xrpld and match the keys xrpld 3.4.1 returns for the same params. Errors use Clio's codes (`malformedOwner`, `malformedAddress`, `malformedDocumentID`, `malformedAuthorizedCredentials`).
