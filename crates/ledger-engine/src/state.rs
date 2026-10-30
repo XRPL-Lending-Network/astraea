@@ -1265,6 +1265,14 @@ impl StateStore {
 
     /// Object `key` as of ledger `at`; `None` if it does not exist (not created or deleted).
     pub fn get(&self, key: &[u8; 32], at: u32) -> Result<Option<Vec<u8>>, String> {
+        Ok(self
+            .version(key, at)?
+            .and_then(|(_, v)| (!v.is_empty()).then_some(v)))
+    }
+
+    /// The last version of `key` written up to ledger `at`: the ledger and the
+    /// object, empty if it was deleted in that ledger.
+    pub fn version(&self, key: &[u8; 32], at: u32) -> Result<Option<(u32, Vec<u8>)>, String> {
         match self.base()? {
             Some(b) if at >= b => {}
             _ => {
@@ -1280,8 +1288,13 @@ impl StateStore {
         else {
             return Ok(None);
         };
-        let (_, v) = guard.into_inner().map_err(err)?;
-        Ok((!v.is_empty()).then(|| v.to_vec()))
+        let (k, v) = guard.into_inner().map_err(err)?;
+        let seq = u32::from_be_bytes(
+            k[32..36]
+                .try_into()
+                .map_err(|_| "bad version key".to_string())?,
+        );
+        Ok(Some((seq, v.to_vec())))
     }
 
     /// Objects `keys` as of ledger `at`, in the same order. Each version read is a

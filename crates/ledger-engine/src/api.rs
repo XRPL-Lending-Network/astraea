@@ -60,9 +60,6 @@ pub(crate) fn internal(e: String) -> RpcError {
 }
 
 pub(crate) type Res<T> = Result<T, RpcError>;
-/// Object key and the type expected under it.
-type EntryKey = ([u8; 32], Option<&'static str>);
-type KeyFn<'a> = &'a dyn Fn(&Map<String, Value>) -> Res<[u8; 32]>;
 
 /// Date from a number of days since 1970-01-01 (Hinnant's algorithm).
 fn civil(days: i64) -> (i64, u32, u32) {
@@ -268,7 +265,7 @@ impl Engine {
     }
 
     pub(crate) fn entry_key_of(&self, p: &Map<String, Value>) -> Res<[u8; 32]> {
-        Ok(self.entry_key(p)?.0)
+        Ok(crate::selector::entry_key(p)?.0)
     }
 
     /// The requested ledger: ledger_hash, ledger_index, or the latest validated one.
@@ -1001,142 +998,26 @@ impl Engine {
         Ok(m)
     }
 
-    /// Object key from ledger_entry params, and the expected type.
-    fn entry_key(&self, p: &Map<String, Value>) -> Res<EntryKey> {
-        let malformed = || rpc_err("malformedRequest", 5001, "Malformed request.");
-        let u32_of = |v: Option<&Value>| v.and_then(as_u32).ok_or_else(malformed);
-        let obj_or_index = |v: &Value, what: &'static str, f: KeyFn<'_>| -> Res<EntryKey> {
-            match v {
-                Value::String(_) => Ok((
-                    hash256(v, "ledgerIndex").map_err(|_| malformed())?,
-                    Some(what),
-                )),
-                Value::Object(o) => Ok((f(o)?, Some(what))),
-                _ => Err(malformed()),
-            }
-        };
-        if let Some(v) = p.get("index") {
-            return Ok((hash256(v, "ledgerIndex").map_err(|_| malformed())?, None));
-        }
-        if let Some(v) = p.get("account_root") {
-            return Ok((
-                keylet(b'a', &[&account_id(v).map_err(|_| malformed())?]),
-                Some("AccountRoot"),
-            ));
-        }
-        if let Some(v) = p.get("check") {
-            return Ok((
-                hash256(v, "ledgerIndex").map_err(|_| malformed())?,
-                Some("Check"),
-            ));
-        }
-        if let Some(v) = p.get("payment_channel") {
-            return Ok((
-                hash256(v, "ledgerIndex").map_err(|_| malformed())?,
-                Some("PayChannel"),
-            ));
-        }
-        if let Some(v) = p.get("nft_page") {
-            return Ok((
-                hash256(v, "ledgerIndex").map_err(|_| malformed())?,
-                Some("NFTokenPage"),
-            ));
-        }
-        if let Some(v) = p.get("offer") {
-            return obj_or_index(v, "Offer", &|o| {
-                let a =
-                    account_id(o.get("account").ok_or_else(malformed)?).map_err(|_| malformed())?;
-                Ok(keylet(b'o', &[&a, &u32_of(o.get("seq"))?.to_be_bytes()]))
-            });
-        }
-        if let Some(v) = p.get("escrow") {
-            return obj_or_index(v, "Escrow", &|o| {
-                let a =
-                    account_id(o.get("owner").ok_or_else(malformed)?).map_err(|_| malformed())?;
-                Ok(keylet(b'u', &[&a, &u32_of(o.get("seq"))?.to_be_bytes()]))
-            });
-        }
-        if let Some(v) = p.get("ticket") {
-            return obj_or_index(v, "Ticket", &|o| {
-                let a =
-                    account_id(o.get("account").ok_or_else(malformed)?).map_err(|_| malformed())?;
-                Ok(keylet(
-                    b'T',
-                    &[&a, &u32_of(o.get("ticket_seq"))?.to_be_bytes()],
-                ))
-            });
-        }
-        if let Some(v) = p.get("deposit_preauth") {
-            return obj_or_index(v, "DepositPreauth", &|o| {
-                let owner =
-                    account_id(o.get("owner").ok_or_else(malformed)?).map_err(|_| malformed())?;
-                let auth = account_id(o.get("authorized").ok_or_else(malformed)?)
-                    .map_err(|_| malformed())?;
-                Ok(keylet(b'p', &[&owner, &auth]))
-            });
-        }
-        if let Some(v) = p.get("ripple_state") {
-            let o = v.as_object().ok_or_else(malformed)?;
-            let accounts = o
-                .get("accounts")
-                .and_then(Value::as_array)
-                .filter(|a| a.len() == 2)
-                .ok_or_else(malformed)?;
-            let a = account_id(&accounts[0]).map_err(|_| malformed())?;
-            let b = account_id(&accounts[1]).map_err(|_| malformed())?;
-            if a == b {
-                return Err(malformed());
-            }
-            let cur = currency_code(
-                o.get("currency")
-                    .and_then(Value::as_str)
-                    .ok_or_else(malformed)?,
-            )
-            .ok_or_else(malformed)?;
-            let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-            return Ok((keylet(b'r', &[&lo, &hi, &cur]), Some("RippleState")));
-        }
-        if let Some(v) = p.get("directory") {
-            return match v {
-                Value::String(_) => Ok((
-                    hash256(v, "ledgerIndex").map_err(|_| malformed())?,
-                    Some("DirectoryNode"),
-                )),
-                Value::Object(o) => {
-                    let root = match (o.get("owner"), o.get("dir_root")) {
-                        (Some(_), Some(_)) | (None, None) => return Err(malformed()),
-                        (Some(owner), None) => {
-                            keylet(b'O', &[&account_id(owner).map_err(|_| malformed())?])
-                        }
-                        (None, Some(r)) => hash256(r, "ledgerIndex").map_err(|_| malformed())?,
-                    };
-                    let sub = o
-                        .get("sub_index")
-                        .map(|v| v.as_u64().ok_or_else(malformed))
-                        .transpose()?
-                        .unwrap_or(0);
-                    let key = if sub == 0 {
-                        root
-                    } else {
-                        keylet(b'd', &[&root, &sub.to_be_bytes()])
-                    };
-                    Ok((key, Some("DirectoryNode")))
-                }
-                _ => Err(malformed()),
-            };
-        }
-        Err(invalid_params("No ledger_entry params provided."))
-    }
-
     fn ledger_entry(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
-        let (key, expected) = self.entry_key(p)?;
+        let (key, expected) = crate::selector::entry_key(p)?;
         let seq = self.resolve_state(p)?;
         let (_, h) = self.header(seq)?;
-        let data = self
-            .state
-            .get(&key, seq)
-            .map_err(internal)?
-            .ok_or_else(|| rpc_err("entryNotFound", 98, "Entry not found."))?;
+        let not_found = || rpc_err("entryNotFound", 98, "Entry not found.");
+        // include_deleted, as in Clio: a deleted object as it was in the
+        // ledger before the one that deleted it.
+        let base = self.state.base().map_err(internal)?.unwrap_or(u32::MAX);
+        let (data, deleted) = match self.state.version(&key, seq).map_err(internal)? {
+            Some((_, v)) if !v.is_empty() => (v, None),
+            Some((at, _)) if as_bool(p.get("include_deleted")) && at > base => {
+                let v = self
+                    .state
+                    .get(&key, at - 1)
+                    .map_err(internal)?
+                    .ok_or_else(not_found)?;
+                (v, Some(at))
+            }
+            _ => return Err(not_found()),
+        };
         let mut node = xrpl_json::ledger_entry(&key, &data).map_err(internal)?;
         if let Some(t) = expected
             && node.get("LedgerEntryType").and_then(Value::as_str) != Some(t)
@@ -1152,6 +1033,9 @@ impl Engine {
         m.insert("index".into(), json!(hex::encode_upper(key)));
         m.insert("ledger_index".into(), json!(seq));
         m.insert("ledger_hash".into(), json!(hex::encode_upper(h.hash())));
+        if let Some(at) = deleted {
+            m.insert("deleted_ledger_index".into(), json!(at));
+        }
         if as_bool(p.get("binary")) {
             m.insert("node_binary".into(), json!(hex::encode_upper(&data)));
         } else {

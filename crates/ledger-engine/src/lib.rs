@@ -5,6 +5,7 @@
 //!
 //! - `api`: Clio-compatible API (ledger, tx, account_tx and others);
 //! - `proof`: Proof API, evidence bundles for a ledger, transaction or object;
+//! - `selector`: the object key from `ledger_entry` params (all selectors of Clio 2.8);
 //! - `server`: HTTP JSON-RPC and WebSocket for `api`;
 //! - `source`: xrpld gRPC client (same as Clio: `GetLedger` with objects);
 //! - `ledger`: a whole ledger, its verification and serialization for the log;
@@ -39,6 +40,7 @@ pub mod log;
 pub mod metrics;
 pub mod owned;
 pub mod proof;
+mod selector;
 pub mod server;
 pub mod source;
 pub mod state;

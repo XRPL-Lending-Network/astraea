@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `ledger_entry` and `proof_entry` take every selector of Clio 2.8. New: `amm`, `bridge`, `credential`, `delegate`, `did`, `loan`, `loan_broker`, `mpt_issuance`, `mptoken`, `oracle`, `permissioned_domain`, `vault`, the two cross-chain claim IDs, `deposit_preauth` by `authorized_credentials`, and a hex key under `amendments`, `fee`, `hashes`, `nft_offer`, `nunl` or `signer_list`. Keys are derived as in xrpld and match the keys xrpld 3.4.1 returns for the same params. Errors use Clio's codes (`malformedOwner`, `malformedAddress`, `malformedDocumentID`, `malformedAuthorizedCredentials`).
+- `ledger_entry` takes `include_deleted`, as in Clio.
+
 ## 0.2.0
 
 - The tree history rebuild replays each of the 4096 subtrees on its own, in memory, from its key range of object versions, on 8 threads; a second pass puts the top of the tree together for every ledger and checks it against `AccountHash`. On mainnet 56 thousand ledgers took 99 seconds instead of about two and a half hours, with records byte for byte the same. After a stop, subtrees already replayed are not read again.
