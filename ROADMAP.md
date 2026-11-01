@@ -10,8 +10,8 @@ Done or in progress now.
 - Ledgers loaded from xrpld and checked before writing: transaction root, parent chain, state root.
 - Confirmation by validator quorum from archived signatures and UNL lists, independent of the source node.
 - Evidence packages for ledgers, transactions and state objects, checkable offline with `witness-verify`.
-- Cold history in ASTJ6 at about 260 bytes per transaction with indexes, measured on the history loaded so far.
-- Full mainnet history from ledger 32571, loaded from the XRPLA archive (loading now).
+- Cold history in ASTJ6 at about 251 bytes per transaction with indexes, measured on the whole mainnet history.
+- Full mainnet history from ledger 32571, loaded from the XRPLA archive.
 
 ## 0.2: proofs for all of history
 

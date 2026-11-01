@@ -176,7 +176,7 @@ def hero():
             f'<rect x="-2.5" y="-2.5" width="5" height="5" rx="1" fill="{DOTS[col]}"/>'
             f'<animateMotion path="{orbit}" dur="{dur}s" begin="{f(begin)}s" repeatCount="indefinite"/></g>')
 
-    stats = [("History from ledger", "32,571"), ("Confirmed by", "80% of the UNL"), ("Cold storage", "~255 B / tx")]
+    stats = [("History from ledger", "32,571"), ("Confirmed by", "80% of the UNL"), ("Cold storage", "~251 B / tx")]
     stat_svg = []
     for i, (label, value) in enumerate(stats):
         x = 64 + i * 178

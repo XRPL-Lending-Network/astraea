@@ -4,7 +4,7 @@
 
 Astraea is a history server for the XRP Ledger. It speaks the same JSON-RPC and WebSocket API as [Clio](https://github.com/XRPLF/clio), so an existing client can point at it without changes. It stores the whole public history, back to ledger 32571, in a compact format of its own. It can also hand you a package of evidence for any ledger, transaction or state object, which you can check on your own machine without trusting Astraea or any node.
 
-The project is at version 0.2: proofs now reach all of history. Its answers have been compared with Clio on recorded production traffic, request by request, and loading the full history is in progress. Expect rough edges in the docs and tooling more than in the data path.
+The project is at version 0.2: proofs now reach all of history. Its answers have been compared with Clio on recorded production traffic, request by request, and the full history is loaded. Expect rough edges in the docs and tooling more than in the data path.
 
 ## Why another history server
 
@@ -24,7 +24,7 @@ The signatures and the UNL lists are archived next to the data, byte for byte as
   <img src="assets/architecture.svg" alt="Sources feed the Ledger Engine and the Proof Engine, which serve the Clio-compatible API and the Proof API" width="100%">
 </p>
 
-The **Ledger Engine** loads validated ledgers from xrpld over gRPC, the same way Clio does. Recent ledgers live in a hot store together with the full account state at every ledger. Older history is packed into cold ASTJ6 segments. With all of its indexes (transaction by hash, ledger by hash, account history) it takes about 260 bytes per transaction on disk.
+The **Ledger Engine** loads validated ledgers from xrpld over gRPC, the same way Clio does. Recent ledgers live in a hot store together with the full account state at every ledger. Older history is packed into cold ASTJ6 segments. With all of its indexes (transaction by hash, ledger by hash, account history) the whole mainnet history takes about 251 bytes per transaction on disk.
 
 The **Proof Engine** listens to the validations stream, checks each signature as it arrives, and decides whether a ledger reached quorum using the UNL lists that were valid for that ledger's close time. It doesn't take the node's word for "validated".
 
@@ -82,19 +82,11 @@ Running a node of your own is covered in [docs/running.md](docs/running.md). The
 
 Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extends proofs to all of history. What comes next is in [ROADMAP.md](ROADMAP.md).
 
-### Full history load, as of 29 October 2026
+### Full history
 
-The archive is loaded from the newest ledger down, in chunks of 32768 ledgers. Each chunk is checked and written as cold segments, then groups of chunks get their indexes and become visible in the API without a restart.
+The whole public history is loaded, from ledger 32571 (1 January 2013) to the current ledger. The archive was loaded from the newest ledger down, in chunks of 32768 ledgers; each chunk was checked and written as cold segments, and groups of chunks got their indexes and became visible in the API without a restart. The load finished on 30 October 2026.
 
-| | Ledgers | Period | Transactions |
-|---|---|---|---|
-| Served by the API | 86,994,501 to the current ledger, about 21.0 million | 31 March 2024 to now | more than 1.8 billion |
-| Written, waiting for indexes | 86,437,445 to 86,994,500 | March 2024 | |
-| Still to load | 32,570 to 86,437,444 | January 2013 to March 2024 | |
-
-On disk, the 43 published groups (1.80 billion transactions) take 466 GB: 418 GB of cold segments, about 232 bytes per transaction, and 48 GB of indexes, about 27 bytes per transaction. That is 259 bytes per transaction in total. Segments written before ASTJ6 are being recoded in place; ASTJ6 costs 8 to 17% in size and makes a single cold transaction read about three times faster.
-
-Older ledgers carry far fewer transactions, so the remaining 86 million ledgers should take less disk per ledger than the last two and a half years.
+On disk, the 5.18 billion transactions of the cold history take 1.30 TB: 1.26 TB of cold segments, about 243 bytes per transaction, and 44 GB of indexes, about 9 bytes per transaction. That is 251 bytes per transaction in total. Recent ledgers cost a little more than the average: across the last two and a half years it was 259 bytes per transaction.
 
 ## License
 
