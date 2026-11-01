@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Cold segments store a state patch only where the metadata doesn't give it. The object after the last transaction that touched it follows from that transaction's node, so most patches can be rebuilt on reading: a new page of a directory usually holds just the object its transaction created, and xrpld's unlisted default fields are filled in. On seven mainnet segments from different years (3.27 million transactions) the segments went from 238.0 to 216.2 bytes per transaction, keeping 4 to 28% of the patches as entries. Every ledger came back byte for byte. `astraea-state history-cold-recode DIR` rewrites older segments while the server runs. They are format `astraea-cold/2`, which earlier versions refuse, so upgrade the server first. A block now holds more transactions: reading one uncached transaction took about 7% longer (0.13 ms), and rebuilding a ledger's patches about 1 ms.
+
 ## 0.3.0
 
 - Cold segments are written without the ASIX2 indexes. Nothing read them: lookups go through the partition indexes. On mainnet they were 18.7 bytes per transaction, about 97 GB. `astraea-state history-cold-drop-index DIR` removes them from older segments; run it only once the server is 0.3 or later, since earlier versions expect the file.

@@ -131,9 +131,10 @@ enum Command {
     /// reads them. The server must already run 0.3 or later, which doesn't
     /// expect them.
     HistoryColdDropIndex { dir: PathBuf },
-    /// Write cold segments again as JC06 (blocks cut into parts read on their
-    /// own), in place and with the server running. Segments already in parts
-    /// are skipped.
+    /// Write cold segments again in the current format (blocks cut into parts
+    /// read on their own, patches kept only where the metadata doesn't give
+    /// them), in place and with the server running. Segments already in it are
+    /// skipped.
     HistoryColdRecode {
         dir: PathBuf,
         #[arg(long)]
@@ -792,7 +793,7 @@ fn main() -> Result<(), String> {
                 .segments()
                 .iter()
                 .filter(|s| {
-                    !s.in_parts()
+                    !(s.in_parts() && s.patches_derived())
                         && first.is_none_or(|f| s.last >= f)
                         && last.is_none_or(|l| s.first <= l)
                 })

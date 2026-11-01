@@ -18,6 +18,8 @@
 //! - `blocks`: block storage with random access by ledger;
 //! - `confirm`: confirmation of ledgers by a quorum of UNL validators;
 //! - `delta`: state changes, diffed against the previous version and metadata;
+//! - `coldpatch`: state patches of cold segments, stored only where the metadata
+//!   doesn't give them;
 //! - `history`: history, format 2: transactions as one frame per ledger with a
 //!   dictionary, state changes in separate blocks;
 //! - `index`: transaction by hash, ledger by hash, account history;
@@ -36,6 +38,7 @@ pub mod api;
 pub mod blocks;
 pub mod bookchanges;
 pub mod cold;
+pub mod coldpatch;
 pub mod coldindex;
 pub mod confirm;
 pub mod delta;

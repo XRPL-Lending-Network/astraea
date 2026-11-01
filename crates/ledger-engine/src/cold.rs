@@ -18,6 +18,12 @@
 //!   and size and SHA-512Half of every file. Written last, via a temporary
 //!   file and rename: without a manifest there is no segment.
 //!
+//! State patches are stored only where the metadata doesn't give them
+//! (`coldpatch`). A segment written that way has format `astraea-cold/2`, so a
+//! server that doesn't know the format refuses it; `astraea-cold/1` segments
+//! hold every patch and stay readable. Each ledger says which it is, so a segment
+//! rewritten while it is being read is read correctly from either archive.
+//!
 //! Change kinds. The codec row (`Row`) does not carry them, and they cannot be
 //! guessed from the metadata. A source with explicit kinds (the node's gRPC) uses
 //! mode `explicit`: kinds are stored as a separate stream and count toward the size.
@@ -52,6 +58,7 @@ use serde_json::{Value, json};
 use witness_core::ledger::LedgerHeader;
 use witness_core::sha512_half;
 
+use crate::coldpatch;
 use crate::ledger::{Change, Ledger, StateChange};
 
 type Res<T> = Result<T, String>;
@@ -59,6 +66,9 @@ type Res<T> = Result<T, String>;
 const KINDS_MAGIC: &[u8; 6] = b"XWCK\x00\x01";
 const SEAL_MAGIC: &[u8; 6] = b"XWCS\x00\x01";
 const SEAL_LISTS: &[u8; 6] = b"XWCS\x00\x02";
+/// The manifest format segments are written in, and the older one with every patch.
+const FORMAT: &str = "astraea-cold/2";
+const FORMAT_ALL_PATCHES: &str = "astraea-cold/1";
 /// Default archive block: at most this many ledgers and exact bytes.
 /// The research's canonical profile uses 16 MiB. 4 MiB costs +18.7% in size
 /// at the 104 million epoch and +26% on recent history, but a cold read takes
@@ -366,7 +376,7 @@ pub fn write(dir: &Path, ledgers: &[Ledger], mode: Kinds) -> Res<Value> {
 /// `write` with a different block limit.
 pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit) -> Res<Value> {
     let first = ledgers.first().ok_or("empty range")?.header()?.sequence;
-    let rows = ledgers.iter().map(row_of).collect::<Res<Vec<_>>>()?;
+    let mut rows = ledgers.iter().map(row_of).collect::<Res<Vec<_>>>()?;
     for (k, r) in rows.iter().enumerate() {
         if r.seq != first + k as u32 {
             return Err(format!(
@@ -376,6 +386,10 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
         }
     }
     let last = first + rows.len() as u32 - 1;
+    let changes: usize = rows.iter().map(|r| r.patches.len()).sum();
+    for r in &mut rows {
+        r.patches = coldpatch::compact(r);
+    }
     // A ledger larger than the limit (some exceed 4 MiB) is not split: for such a
     // segment the limit is raised to its size; other segments are unaffected.
     let raw = rows.iter().map(row_raw).max().unwrap_or(0) + 4;
@@ -406,7 +420,7 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
     let file =
         |b: &[u8]| json!({"bytes": b.len(), "sha512half": hex::encode_upper(sha512_half(b))});
     let manifest = json!({
-        "format": "astraea-cold/1",
+        "format": FORMAT,
         "payload": if limit.part > 0 { "ASTJ6" } else { "ASTJ5" },
         "profile": "canonical",
         "codec": "astraea-journal-codec 0.1.0 (astraea-journal-sequential-2026-10-27)",
@@ -414,7 +428,7 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
         "last": last,
         "ledgers": rows.len(),
         "transactions": rows.iter().map(|r| r.txs.len()).sum::<usize>(),
-        "changes": rows.iter().map(|r| r.patches.len()).sum::<usize>(),
+        "changes": changes,
         "blocks": u32::from_le_bytes(archive[8..12].try_into().map_err(|_| "archive header")?),
         "max_block_ledgers": limit.ledgers,
         "max_block_raw_bytes": limit.raw,
@@ -495,7 +509,9 @@ impl ColdSegment {
                 continue;
             }
             let m: Value = serde_json::from_slice(&fs::read(&p).map_err(io)?).map_err(corrupt)?;
-            if m["format"] != "astraea-cold/1"
+            if ![FORMAT, FORMAT_ALL_PATCHES]
+                .map(Value::from)
+                .contains(&m["format"])
                 || !["ASTJ5", "ASTJ6"].map(Value::from).contains(&m["payload"])
             {
                 return Err(corrupt(format!("{name}: unknown format")));
@@ -590,8 +606,20 @@ impl ColdSegment {
         self.manifest["payload"] == "ASTJ6"
     }
 
-    /// Writes the segment again with JC06 blocks of at most `part` exact bytes
-    /// per part, next to the archive (the target of a link). The ledgers,
+    /// Whether the segment stores only the patches the metadata doesn't give.
+    pub fn patches_derived(&self) -> bool {
+        self.manifest["format"] == FORMAT
+    }
+
+    /// Ledger `seq` as written: transactions and every patch.
+    fn whole_row(&self, o: &Open, seq: u32) -> Res<Row> {
+        let mut row = o.pool.ledger(seq).map_err(corrupt)?;
+        row.patches = coldpatch::restore(&row.txs, row.seq, &row.patches).map_err(corrupt)?;
+        Ok(row)
+    }
+
+    /// Writes the segment again in the current format, with JC06 blocks of at most
+    /// `part` exact bytes per part, next to the archive (the target of a link). The ledgers,
     /// indexes and change kinds come out the same, which is checked; the
     /// archive, seal and manifest are then replaced, each by rename. A reader
     /// that has the segment open keeps the old archive; one that opens it
@@ -605,7 +633,7 @@ impl ColdSegment {
                 self.read(&o, seq, true)?
             } else {
                 // Kinds are not recorded: written the same way as the loader does.
-                let row = o.pool.ledger(seq).map_err(corrupt)?;
+                let row = self.whole_row(&o, seq)?;
                 Ledger {
                     header: row.header,
                     transactions: row.txs,
@@ -792,11 +820,10 @@ impl ColdSegment {
         // Patches are decoded only when changes are asked for: they outweigh
         // the transactions and API reads don't need them.
         let row = if with_changes {
-            o.pool.ledger(seq)
+            self.whole_row(o, seq)?
         } else {
-            o.pool.ledger_txs(seq)
-        }
-        .map_err(corrupt)?;
+            o.pool.ledger_txs(seq).map_err(corrupt)?
+        };
         if row.seq != seq {
             return Err(corrupt(format!(
                 "at position {seq} found ledger {}",
@@ -1248,6 +1275,99 @@ pub(crate) mod tests {
             }
             assert_eq!(got[&715].transactions[0].1[2..6], 2u32.to_be_bytes());
         }
+    }
+
+    /// A chain whose transactions modify one account each, with exactly the
+    /// patch their metadata gives, plus the changes of `chain`, sorted by key.
+    fn chain_with_derived_patches(first: u32, n: u32) -> Vec<Ledger> {
+        let mut out = chain(first, n);
+        let mut parent = [0u8; 32];
+        for (k, l) in out.iter_mut().enumerate() {
+            let seq = l.header().unwrap().sequence;
+            let mut tx = vec![0x12, 0x00, 0x00, 0x24];
+            tx.extend((k as u32).to_be_bytes());
+            let id = witness_core::shamap::tx_id(&tx);
+            let key = [0xC0 + k as u8; 32];
+            let sequence = [0x24, 0, 0, 0, k as u8];
+            let mut meta = vec![0x20, 0x1C, 0, 0, 0, 0, 0xF8, 0xE5, 0x11, 0x00, 0x61, 0x56];
+            meta.extend(key);
+            meta.push(0xE7);
+            meta.extend(sequence);
+            meta.extend([0xE1, 0xE1, 0xF1, 0x03, 0x10, 0x00]);
+            let mut data = vec![0x11, 0x00, 0x61];
+            data.extend(sequence);
+            l.changes.push(StateChange {
+                key,
+                change: Change::Modified,
+                data,
+            });
+            l.changes.sort_by_key(|c| c.key);
+            let leaf = witness_core::shamap::tx_leaf_hash(&tx, &meta, &id);
+            l.header[12..44].copy_from_slice(&parent);
+            l.header[44..76].copy_from_slice(&witness_core::shamap::root(&[(id, leaf)]));
+            parent = LedgerHeader::parse(&l.header).unwrap().hash();
+            l.transactions = vec![(tx, meta)];
+            assert_eq!(seq, first + k as u32);
+        }
+        out
+    }
+
+    #[test]
+    fn patches_the_metadata_gives_are_not_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let ls = chain_with_derived_patches(900, 12);
+        let m = write(dir.path(), &ls, Kinds::Explicit).unwrap();
+        assert_eq!(m["format"], FORMAT);
+        assert_eq!(m["changes"], 12 * 4);
+        let cold = Cold::open(dir.path()).unwrap();
+        for l in &ls {
+            let seq = l.header().unwrap().sequence;
+            assert_eq!(cold.ledger(seq, true).unwrap().unwrap(), *l);
+        }
+        let seg = &cold.segments()[0];
+        assert!(seg.patches_derived());
+        let pool = Pool::open(&seg.paths[0], 0, 1).unwrap();
+        // The marker and the three changes of `chain`.
+        assert_eq!(pool.ledger(905).unwrap().patches.len(), 4);
+    }
+
+    #[test]
+    fn older_segments_with_every_patch_are_read_and_recoded() {
+        for kinds in [Kinds::Explicit, Kinds::NotRecorded] {
+            let dir = tempfile::tempdir().unwrap();
+            let ls = chain_with_txs(950, 12);
+            let mut m = write(dir.path(), &ls, kinds).unwrap();
+            // A manifest in the older format; each row says how it is stored.
+            m["format"] = FORMAT_ALL_PATCHES.into();
+            let json = names(dir.path(), 950)[3].clone();
+            fs::write(&json, serde_json::to_vec(&m).unwrap()).unwrap();
+            let cold = Cold::open(dir.path()).unwrap();
+            let seg = &cold.segments()[0];
+            assert!(seg.in_parts() && !seg.patches_derived());
+            if kinds == Kinds::Explicit {
+                assert_eq!(cold.ledger(955, true).unwrap().unwrap(), ls[5]);
+            }
+            seg.recode(PART_RAW).unwrap();
+            let cold = Cold::open(dir.path()).unwrap();
+            assert!(cold.segments()[0].patches_derived());
+            if kinds == Kinds::Explicit {
+                assert_eq!(cold.ledger(955, true).unwrap().unwrap(), ls[5]);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_formats_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = write(dir.path(), &chain(970, 4), Kinds::Explicit).unwrap();
+        m["format"] = "astraea-cold/3".into();
+        let json = names(dir.path(), 970)[3].clone();
+        fs::write(&json, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(
+            ColdSegment::scan(dir.path())
+                .unwrap_err()
+                .contains("unknown format")
+        );
     }
 
     #[test]
