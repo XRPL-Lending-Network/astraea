@@ -4,7 +4,7 @@ Astraea is general infrastructure for the XRP Ledger. It is not tied to any one 
 
 ## 0.1: a Clio replacement with proofs
 
-Done or in progress now.
+Released.
 
 - Clio-compatible JSON-RPC and WebSocket API for history and state, compared with Clio request by request on recorded production traffic.
 - Ledgers loaded from xrpld and checked before writing: transaction root, parent chain, state root.
@@ -22,14 +22,22 @@ Released.
 - `proof_entry` for state at earlier ledgers, back to the state snapshot.
 - Metrics on how far the data can be trusted: quorum margin, UNL lists and their expiry, how each proof was confirmed, and what part of history is served with state and with proofs.
 
-## 0.3: a public endpoint
+## 0.3: ready for public traffic
 
-- TLS, rate limits and edge caching of answers about closed ledgers, which never change.
+Released.
+
+- Limits per client, like Clio's DOS guard, with the client's address taken from a trusted proxy or tunnel.
+- Answers that never change marked for an edge cache.
+- A time limit for every request.
+- The rest of Clio's surface: `book_changes`, the NFT methods, and the `validations` and `manifests` streams.
+
+## Next: a public endpoint
+
+- Serving the public behind a tunnel that terminates TLS, with an edge cache keyed on the request body.
 
 ## Later
 
 - State at any historical ledger, not only from the snapshot onward.
-- More of Clio's surface: the `validations` stream.
 - Smaller cold history (a target of under 217 bytes per transaction across all of history).
 - Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
 - Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.

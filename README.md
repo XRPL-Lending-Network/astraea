@@ -4,7 +4,7 @@
 
 Astraea is a history server for the XRP Ledger. It speaks the same JSON-RPC and WebSocket API as [Clio](https://github.com/XRPLF/clio), so an existing client can point at it without changes. It stores the whole public history, back to ledger 32571, in a compact format of its own. It can also hand you a package of evidence for any ledger, transaction or state object, which you can check on your own machine without trusting Astraea or any node.
 
-The project is at version 0.2: proofs now reach all of history. Its answers have been compared with Clio on recorded production traffic, request by request, and the full history is loaded. Expect rough edges in the docs and tooling more than in the data path.
+The project is at version 0.3: it answers everything Clio answers, over the full history, and has the limits a public server needs. Its answers have been compared with Clio on recorded production traffic, request by request. Expect rough edges in the docs and tooling more than in the data path.
 
 ## Why another history server
 
@@ -34,7 +34,7 @@ Both feed the API. More detail in [docs/architecture.md](docs/architecture.md).
 
 Clio-compatible methods, answered from Astraea's own data:
 
-`server_info`, `ping`, `ledger`, `tx` (by hash or CTID), `account_tx`, `account_info`, `account_lines`, `account_objects`, `account_offers`, `ledger_entry`, `ledger_data`, `mpt_holders`, `account_nfts`, `nft_buy_offers`, `nft_sell_offers`, `nft_info`, `nft_history`, `nfts_by_issuer`, `book_changes`, and WebSocket `subscribe` for the `ledger`, `transactions` and `book_changes` streams and for accounts.
+`server_info`, `ping`, `ledger`, `tx` (by hash or CTID), `account_tx`, `account_info`, `account_lines`, `account_objects`, `account_offers`, `ledger_entry`, `ledger_data`, `mpt_holders`, `account_nfts`, `nft_buy_offers`, `nft_sell_offers`, `nft_info`, `nft_history`, `nfts_by_issuer`, `book_changes`, and WebSocket `subscribe` for the `ledger`, `transactions`, `book_changes`, `validations` and `manifests` streams and for accounts.
 
 Methods that Clio forwards to a node (`fee`, `server_state`, `ledger_current`, `server_definitions`, and read-only queries against the open ledger) are forwarded the same way. Submitting transactions is not supported.
 
@@ -80,7 +80,7 @@ Running a node of your own is covered in [docs/running.md](docs/running.md). The
 
 ## Status and plans
 
-Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extends proofs to all of history. What comes next is in [ROADMAP.md](ROADMAP.md).
+Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs. What comes next is in [ROADMAP.md](ROADMAP.md).
 
 ### Full history
 

@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- Cold segments are written without the ASIX2 indexes. Nothing read them: lookups go through the partition indexes. On mainnet they were 18.7 bytes per transaction, about 97 GB. `astraea-state history-cold-drop-index DIR` removes them from older segments; run it only once the server is 0.3 or later, since earlier versions expect the file.
+- The `validations` and `manifests` streams, as in Clio: the nodes' messages passed on as received, each once even when several nodes send it. They come from the validation stream the Proof Engine already listens to.
+- A stop is taken while waiting on the node or between retries. Before, a server retrying a ledger the node no longer had ignored the stop until systemd killed it.
 - Limits per client, like Clio's `dos_guard`: weighted requests and response bytes per interval, and connections open at once (`--max-requests`, `--max-response-bytes`, `--max-connections`, `--sweep-secs`). A client over its limit gets `slowDown`, over HTTP with status 503. A whitelist is never limited, and behind a trusted proxy (`--trusted-proxies`) the client is taken from `CF-Connecting-IP`, `Forwarded` or `X-Forwarded-For`. Off unless configured.
 - HTTP answers say whether they can be cached: `Cache-Control: public, max-age=86400, immutable` for a transaction or anything about a ledger named by sequence or hash, `no-store` for the rest, so a cache in front of a public server can keep what never changes.
 - `nft_info`, `nft_history` and `nfts_by_issuer`, from a new NFT index in the state store: each token's owner and URI at every ledger they changed, the tokens of each issuer by taxon, and each token's transactions. NFT transactions are read by the rules of Clio's `NFTHelpers`; one that can't be read is logged and skipped instead of stopping the load. A store that adds the index fills the earlier ledgers in the background, from the history, keeping its progress across restarts. On mainnet that is everything from ledger 75,443,457, where NonFungibleTokensV1_1 was enabled: 32.6 million ledgers took 16 minutes, and not one NFT transaction failed to read. A store whose history doesn't reach that far starts from the tokens in its state snapshot, as Clio starts from its first ledger. Differences from Clio are listed in [docs/api.md](docs/api.md#nft-index).
