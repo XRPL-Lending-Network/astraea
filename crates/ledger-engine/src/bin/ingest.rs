@@ -588,8 +588,14 @@ async fn run(args: Args) -> Result<(), String> {
         .map(|h| hex::decode(h).map_err(|e| format!("publisher key {h}: {e}")))
         .collect::<Result<Vec<_>, _>>()?;
     let confirmer = Confirmer::new(publishers, args.unl_dir.clone());
+    // The nodes' validations and manifests, passed on to API subscribers.
+    let (node_streams, _) = tokio::sync::broadcast::channel(4096);
     for url in &args.validations_ws {
-        tokio::spawn(confirm::listen(url.clone(), confirmer.clone()));
+        tokio::spawn(confirm::listen(
+            url.clone(),
+            confirmer.clone(),
+            Some(node_streams.clone()),
+        ));
     }
     lock(&metrics).confirmed_ledger = sink.state.confirmed()?.unwrap_or(0);
     lock(&metrics).evidence_ledger = sink.state.last_evidence()?.unwrap_or(0);
@@ -657,6 +663,7 @@ async fn run(args: Args) -> Result<(), String> {
             forwarder,
             metrics.clone(),
             guard,
+            Some(node_streams.clone()),
         ));
     }
     // Tree history below the ledger it started at, rebuilt in the background
@@ -724,7 +731,9 @@ async fn run(args: Args) -> Result<(), String> {
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
     let mut stats_at = Instant::now();
     let mut written = 0u64;
-    loop {
+    // A stop is taken while waiting on the node or between retries, never in
+    // the middle of writing a ledger.
+    'run: loop {
         let tip = tokio::select! {
             r = source.validated() => r,
             _ = &mut shutdown => break,
@@ -749,7 +758,11 @@ async fn run(args: Args) -> Result<(), String> {
         };
         while sink.next() <= tip {
             let next = sink.next();
-            let ledger = match source.ledger(next).await {
+            let fetched = tokio::select! {
+                r = source.ledger(next) => r,
+                _ = &mut shutdown => break 'run,
+            };
+            let ledger = match fetched {
                 Ok(l) => l,
                 Err(e) => {
                     let missing = e.contains("NotFound") || e.contains("not found");
@@ -759,7 +772,11 @@ async fn run(args: Args) -> Result<(), String> {
                         m.missing_retries += u64::from(missing);
                     }
                     warn!("ledger {next}: {e}; retrying");
-                    tokio::time::sleep(Duration::from_secs(if missing { 30 } else { 2 })).await;
+                    let pause = Duration::from_secs(if missing { 30 } else { 2 });
+                    tokio::select! {
+                        _ = tokio::time::sleep(pause) => {}
+                        _ = &mut shutdown => break 'run,
+                    }
                     continue;
                 }
             };

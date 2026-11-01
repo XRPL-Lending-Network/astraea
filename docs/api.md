@@ -80,7 +80,7 @@ Nothing else is forwarded, whatever its parameters say. Transaction submission a
 
 ### Subscriptions (WebSocket)
 
-`subscribe` and `unsubscribe` support the `ledger`, `transactions` and `book_changes` streams and `accounts`. A ledger's `bookChanges` message comes after its transactions, as in Clio. The streams Clio offers that Astraea doesn't (`validations`, `manifests`, `transactions_proposed`, `accounts_proposed`, `books`) return `notSupported` instead of a silent subscription.
+`subscribe` and `unsubscribe` support the `ledger`, `transactions`, `book_changes`, `validations` and `manifests` streams and `accounts`. A ledger's `bookChanges` message comes after its transactions, as in Clio. Validation and manifest messages are the nodes' own, passed on as received, as Clio does; Astraea listens to several nodes, and a message that comes from more than one is sent once. The streams Clio offers that Astraea doesn't (`transactions_proposed`, `accounts_proposed`, `books`) return `notSupported` instead of a silent subscription.
 
 - Each confirmed ledger is published once, in order: `ledgerClosed` first, then its transactions by `TransactionIndex`.
 - After subscribing to `ledger`, the first `ledgerClosed` is for the ledger right after the one in the subscribe response.

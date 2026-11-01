@@ -463,10 +463,14 @@ fn rebuild_masters(g: &mut Inner) {
 }
 
 /// Listens to the node's validation stream for the life of the process; reconnects on drop.
-pub async fn listen(url: String, confirmer: Confirmer) {
+/// Messages of the node's `validations` and `manifests` streams, as received,
+/// for clients subscribed to them (`subs::forward_streams`).
+pub type NodeStreams = tokio::sync::broadcast::Sender<Arc<str>>;
+
+pub async fn listen(url: String, confirmer: Confirmer, streams: Option<NodeStreams>) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        match session(&url, &confirmer).await {
+        match session(&url, &confirmer, streams.as_ref()).await {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(e) => warn!("validations {url}: {e}"),
         }
@@ -476,9 +480,10 @@ pub async fn listen(url: String, confirmer: Confirmer) {
     }
 }
 
-async fn session(url: &str, c: &Confirmer) -> Result<(), String> {
+async fn session(url: &str, c: &Confirmer, streams: Option<&NodeStreams>) -> Result<(), String> {
     let (mut ws, _) = connect_async(url).await.map_err(|e| e.to_string())?;
-    let subscribe = json!({"id": 1, "command": "subscribe", "streams": ["validations"]});
+    let subscribe =
+        json!({"id": 1, "command": "subscribe", "streams": ["validations", "manifests"]});
     ws.send(Message::text(subscribe.to_string()))
         .await
         .map_err(|e| e.to_string())?;
@@ -497,7 +502,14 @@ async fn session(url: &str, c: &Confirmer) -> Result<(), String> {
                     Some(Err(e)) => return Err(e.to_string()),
                 };
                 let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-                if v.get("type").and_then(Value::as_str) == Some("validationReceived") {
+                let kind = v.get("type").and_then(Value::as_str);
+                if let Some(s) = streams
+                    && matches!(kind, Some("validationReceived" | "manifestReceived"))
+                {
+                    // No receivers is not an error: nobody is subscribed.
+                    let _ = s.send(Arc::from(text.as_str()));
+                }
+                if kind == Some("validationReceived") {
                     last = Instant::now();
                     let Some(raw) = v.get("data").and_then(Value::as_str).and_then(|d| hex::decode(d).ok()) else {
                         continue;

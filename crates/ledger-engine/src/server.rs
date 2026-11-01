@@ -599,6 +599,7 @@ fn app(
     forwarder: Option<Arc<Forwarder>>,
     metrics: metrics::Shared,
     guard: GuardConfig,
+    streams: Option<crate::confirm::NodeStreams>,
 ) -> Router {
     let guard = Arc::new(Guard::new(guard));
     if let Some(every) = guard.sweep_every() {
@@ -621,6 +622,9 @@ fn app(
         guard,
     };
     tokio::spawn(subs::run(shared.engine.clone(), shared.hub.clone()));
+    if let Some(s) = streams {
+        tokio::spawn(subs::forward_streams(shared.hub.clone(), s.subscribe()));
+    }
     tokio::spawn(sample(shared.clone()));
     Router::new()
         .route("/", get(ws_upgrade).post(http_rpc))
@@ -640,6 +644,8 @@ async fn sample(s: Shared) {
                 ("ledger", h.ledger),
                 ("transactions", h.transactions),
                 ("book_changes", h.book_changes),
+                ("validations", h.validations),
+                ("manifests", h.manifests),
                 ("accounts", h.account_sessions),
             ]
             .into_iter()
@@ -661,8 +667,9 @@ pub async fn serve(
     forwarder: Option<Arc<Forwarder>>,
     metrics: metrics::Shared,
     guard: GuardConfig,
+    streams: Option<crate::confirm::NodeStreams>,
 ) {
-    let app = app(engine, forwarder, metrics, guard);
+    let app = app(engine, forwarder, metrics, guard, streams);
     for addr in addrs {
         let app = app.clone();
         tokio::spawn(async move {
@@ -720,6 +727,7 @@ mod tests {
             None,
             metrics.clone(),
             guard,
+            None,
         )
         .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, routes).await });
@@ -814,6 +822,7 @@ mod tests {
             None,
             metrics.clone(),
             GuardConfig::default(),
+            None,
         )
         .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, routes).await });

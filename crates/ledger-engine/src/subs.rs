@@ -1,8 +1,13 @@
 //! WebSocket subscriptions, as in Clio 2.8: the `ledger` stream
-//! (ledgerClosed), the `transactions` stream, the `book_changes` stream, and
-//! per-account transactions via `accounts`. Other Clio streams (validations,
-//! manifests, *_proposed, books) return notSupported: a subscription that never
-//! sends messages would mislead the client.
+//! (ledgerClosed), the `transactions` stream, the `book_changes` stream,
+//! per-account transactions via `accounts`, and the `validations` and
+//! `manifests` streams. Other Clio streams (*_proposed, books) return
+//! notSupported: a subscription that never sends messages would mislead the
+//! client.
+//!
+//! Validations and manifests come from the nodes' own streams, which the Proof
+//! Engine listens to anyway (`confirm`), and are passed on as received, like
+//! Clio does. With two nodes each message arrives twice; it is sent once.
 //!
 //! Every ledger validated by a quorum (the upper bound of
 //! `range`) is published in order: ledgerClosed first, then transactions by
@@ -52,6 +57,8 @@ struct Sub {
     ledger_after: u32,
     transactions: bool,
     book_changes: bool,
+    validations: bool,
+    manifests: bool,
     accounts: HashSet<AccountId>,
     out: mpsc::Sender<String>,
 }
@@ -71,6 +78,8 @@ pub struct HubStats {
     pub ledger: u64,
     pub transactions: u64,
     pub book_changes: u64,
+    pub validations: u64,
+    pub manifests: u64,
     /// Sessions subscribed to at least one account, and accounts over all of them.
     pub account_sessions: u64,
     pub accounts: u64,
@@ -83,6 +92,8 @@ pub struct Request {
     pub ledger: bool,
     pub transactions: bool,
     pub book_changes: bool,
+    pub validations: bool,
+    pub manifests: bool,
     pub accounts: Vec<AccountId>,
 }
 
@@ -106,9 +117,9 @@ pub fn parse(p: &Map<String, Value>) -> Result<Request, RpcError> {
                     Some("ledger") => r.ledger = true,
                     Some("transactions") => r.transactions = true,
                     Some("book_changes") => r.book_changes = true,
-                    Some(s @ ("validations" | "manifests" | "transactions_proposed")) => {
-                        return Err(not_supported(s));
-                    }
+                    Some("validations") => r.validations = true,
+                    Some("manifests") => r.manifests = true,
+                    Some(s @ "transactions_proposed") => return Err(not_supported(s)),
                     Some(_) => return Err(rpc_err("malformedStream", 71, "Stream malformed.")),
                 }
             }
@@ -157,6 +168,8 @@ impl Hub {
                 ledger_after: 0,
                 transactions: false,
                 book_changes: false,
+                validations: false,
+                manifests: false,
                 accounts: HashSet::new(),
                 out,
             },
@@ -178,6 +191,8 @@ impl Hub {
             st.ledger += u64::from(s.ledger);
             st.transactions += u64::from(s.transactions);
             st.book_changes += u64::from(s.book_changes);
+            st.validations += u64::from(s.validations);
+            st.manifests += u64::from(s.manifests);
             st.account_sessions += u64::from(!s.accounts.is_empty());
             st.accounts += s.accounts.len() as u64;
         }
@@ -194,6 +209,8 @@ impl Hub {
             s.ledger |= r.ledger;
             s.transactions |= r.transactions;
             s.book_changes |= r.book_changes;
+            s.validations |= r.validations;
+            s.manifests |= r.manifests;
             s.accounts.extend(r.accounts.iter().copied());
         }
     }
@@ -203,6 +220,8 @@ impl Hub {
             s.ledger &= !r.ledger;
             s.transactions &= !r.transactions;
             s.book_changes &= !r.book_changes;
+            s.validations &= !r.validations;
+            s.manifests &= !r.manifests;
             for a in &r.accounts {
                 s.accounts.remove(a);
             }
@@ -237,6 +256,73 @@ impl Hub {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             warn!("subscriptions: session {id} can't keep up reading, disconnected");
             self.leave(id);
+        }
+    }
+}
+
+/// Messages of the nodes' validations and manifests streams seen lately, by
+/// their signed content, so a message two nodes both send goes out once.
+const SEEN_STREAM_MESSAGES: usize = 4096;
+
+impl Hub {
+    /// Sends a node's validationReceived or manifestReceived message to the
+    /// sessions subscribed to its stream, unless it was sent already.
+    fn node_message(
+        &self,
+        text: &str,
+        seen: &mut (HashSet<String>, std::collections::VecDeque<String>),
+    ) {
+        let Ok(v) = serde_json::from_str::<Value>(text) else {
+            return;
+        };
+        let (validation, key) = match v.get("type").and_then(Value::as_str) {
+            Some("validationReceived") => (true, v.get("data")),
+            Some("manifestReceived") => (false, v.get("manifest")),
+            _ => return,
+        };
+        let Some(key) = key.and_then(Value::as_str) else {
+            return;
+        };
+        if !seen.0.insert(key.to_owned()) {
+            return;
+        }
+        seen.1.push_back(key.to_owned());
+        if seen.1.len() > SEEN_STREAM_MESSAGES
+            && let Some(old) = seen.1.pop_front()
+        {
+            seen.0.remove(&old);
+        }
+        let targets: Vec<(u64, String)> = self
+            .lock()
+            .iter()
+            .filter(|(_, s)| {
+                if validation {
+                    s.validations
+                } else {
+                    s.manifests
+                }
+            })
+            .map(|(id, _)| (*id, text.to_owned()))
+            .collect();
+        if !targets.is_empty() {
+            self.deliver(&targets);
+        }
+    }
+}
+
+/// Passes the nodes' validations and manifests on to subscribers.
+pub async fn forward_streams(hub: Arc<Hub>, mut rx: tokio::sync::broadcast::Receiver<Arc<str>>) {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut seen = (HashSet::new(), std::collections::VecDeque::new());
+    loop {
+        match rx.recv().await {
+            Ok(m) => hub.node_message(&m, &mut seen),
+            // Too slow to keep up for a moment: those messages are gone, as on
+            // a node that drops a subscriber's backlog.
+            Err(RecvError::Lagged(n)) => {
+                warn!("subscriptions: {n} validation stream messages skipped")
+            }
+            Err(RecvError::Closed) => return,
         }
     }
 }
@@ -563,13 +649,45 @@ mod tests {
     }
 
     #[test]
+    fn node_validations_go_once_to_their_subscribers() {
+        let hub = Hub::default();
+        let (a, mut ra) = hub.join();
+        let (b, mut rb) = hub.join();
+        let r = parse(&p(json!({"streams": ["validations"]}))).unwrap();
+        assert!(r.validations && !r.manifests);
+        hub.subscribe(a, &r, 2, 0);
+        hub.subscribe(
+            b,
+            &parse(&p(json!({"streams": ["manifests"]}))).unwrap(),
+            2,
+            0,
+        );
+        let mut seen = (HashSet::new(), std::collections::VecDeque::new());
+        let v = r#"{"type":"validationReceived","data":"AB","ledger_index":"5"}"#;
+        let m = r#"{"type":"manifestReceived","manifest":"JA=="}"#;
+        // The same validation from a second node is not sent again.
+        hub.node_message(v, &mut seen);
+        hub.node_message(v, &mut seen);
+        hub.node_message(m, &mut seen);
+        hub.node_message(r#"{"type":"ledgerClosed"}"#, &mut seen);
+        assert_eq!(ra.try_recv().unwrap(), v);
+        assert!(ra.try_recv().is_err());
+        assert_eq!(rb.try_recv().unwrap(), m);
+        assert!(rb.try_recv().is_err());
+        hub.unsubscribe(a, &r);
+        hub.node_message(r#"{"type":"validationReceived","data":"CD"}"#, &mut seen);
+        assert!(ra.try_recv().is_err());
+        assert_eq!(hub.stats().manifests, 1);
+    }
+
+    #[test]
     fn requests_parse_with_clio_errors() {
         let err = |v: Value| parse(&p(v)).unwrap_err();
         assert_eq!(err(json!({"streams": "ledger"})).message, "streamsNotArray");
         assert_eq!(err(json!({"streams": [1]})).message, "streamNotString");
         assert_eq!(err(json!({"streams": ["nope"]})).error, "malformedStream");
         assert_eq!(
-            err(json!({"streams": ["validations"]})).error,
+            err(json!({"streams": ["transactions_proposed"]})).error,
             "notSupported"
         );
         assert_eq!(err(json!({"accounts": "x"})).message, "accountsNotArray");
