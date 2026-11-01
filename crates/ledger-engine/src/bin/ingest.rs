@@ -185,9 +185,13 @@ fn backfill_nfts(state: &Arc<StateStore>, history: &Path, start: u32) -> Result<
             .zip(got)
             .map(|(s, l)| match l {
                 Some(l) => Ok(l),
+                // A ledger pending when the reader opened may have been
+                // written to history files since, and left pending.
                 None => match state.pending_ledger(*s)? {
                     Some(b) => Ledger::decode(&b),
-                    None => Err(format!("ledger {s} is not in history")),
+                    None => reader
+                        .get_txs(*s)?
+                        .ok_or(format!("ledger {s} is not in history")),
                 },
             })
             .collect()
