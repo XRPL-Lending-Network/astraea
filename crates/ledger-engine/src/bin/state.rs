@@ -127,6 +127,10 @@ enum Command {
         #[arg(long, default_value_t = 8)]
         threads: usize,
     },
+    /// Remove the ASIX2 indexes of cold segments written before 0.3: nothing
+    /// reads them. The server must already run 0.3 or later, which doesn't
+    /// expect them.
+    HistoryColdDropIndex { dir: PathBuf },
     /// Write cold segments again as JC06 (blocks cut into parts read on their
     /// own), in place and with the server running. Segments already in parts
     /// are skipped.
@@ -759,6 +763,20 @@ fn main() -> Result<(), String> {
             }
             println!(
                 "sealed {sealed} cold segments, {skipped} already sealed, in {:.0} s",
+                t.elapsed().as_secs_f64()
+            );
+        }
+        Command::HistoryColdDropIndex { dir } => {
+            let cold = ledger_engine::cold::Cold::open(&dir)?;
+            let (mut n, mut bytes) = (0, 0u64);
+            for seg in cold.segments() {
+                let b = seg.drop_index()?;
+                n += usize::from(b > 0);
+                bytes += b;
+            }
+            println!(
+                "removed ASIX2 indexes of {n} cold segments, {:.1} GB, in {:.0} s",
+                bytes as f64 / 1e9,
                 t.elapsed().as_secs_f64()
             );
         }

@@ -92,6 +92,8 @@ Answers that can never change (a transaction, or anything about a ledger named b
 
 `scripts/astraea-full-history.sh` downloads the XRPLA archive in chunks of 32,768 ledgers from the top down, several chunks at a time, and writes each into cold segments. `scripts/astraea-full-publish.py` picks up finished chunks in order, groups them, builds indexes, checks that each group joins the history already served, and publishes it into the live directory without restarting the server. Both scripts can be stopped and restarted at any point. Segments written by this version come with a seal, so the server checks each block once instead of on every load; for segments written earlier, run `astraea-state history-cold-seal <dir>` on the live directory. Segments are written as ASTJ6, whose blocks are cut into parts read on their own; `astraea-state history-cold-recode <dir>` rewrites older ASTJ5 segments in place, a few at a time (`--threads`), while the server keeps serving them. A recent segment takes about two and a half minutes per thread.
 
+Segments written before 0.3 also carry ASIX2 indexes (`cold-F.asix`) that nothing reads; `astraea-state history-cold-drop-index <dir>` removes them, the manifest first and then the file. Run it after the server has been upgraded to 0.3: earlier versions refuse a segment whose manifest lacks the file.
+
 Their settings come from environment variables; `ASTRAEA_HOME` defaults to `/var/lib/astraea`:
 
 | Variable | Default | Meaning |

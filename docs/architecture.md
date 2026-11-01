@@ -30,7 +30,7 @@ Ledgers older than the state snapshot have transactions but no queryable state. 
 | File | Contents |
 |---|---|
 | `cold-F.astj` | independent blocks of up to 1024 ledgers or 4 MiB, each with a SHA-512Half of its exact bytes; an ASTJ6 block is cut into parts of up to 1 MiB |
-| `cold-F.asix` | ASIX2 indexes built by the codec |
+| `cold-F.asix` | ASIX2 indexes built by the codec; only in segments written before 0.3, and nothing reads them (`astraea-state history-cold-drop-index` removes them) |
 | `cold-F.kinds` | kind of each state change, when the source recorded it |
 | `cold-F.seal` | digests of each block's stored bytes (of an ASTJ6 block, its head and every part), recorded after the block passed the full check |
 | `cold-F.json` | manifest: range, profile, sizes and hashes of the other files; written last |

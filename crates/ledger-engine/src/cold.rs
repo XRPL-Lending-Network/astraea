@@ -5,8 +5,10 @@
 //! A segment whose first ledger is F is four files in one directory:
 //! - `cold-F.astj`: an ASTJ5 archive of independent blocks of at most 1024 ledgers
 //!   or 4 MiB of exact bytes (`BLOCK_RAW`); each block has a SHA-512Half of its exact bytes;
-//! - `cold-F.asix`: the codec's four ASIX2 indexes: transaction and ledger by
-//!   hash, account history and object history;
+//! - `cold-F.asix`: only in segments written before 0.3, the codec's four
+//!   ASIX2 indexes (transaction and ledger by hash, account history, object
+//!   history). Nothing reads them: lookups go through the partition indexes
+//!   (`coldindex`). `ColdSegment::drop_index` removes them;
 //! - `cold-F.kinds`: the kind of every state change (`XWCK\0\1`);
 //! - `cold-F.seal`: optional, digests of every block's stored bytes taken
 //!   after the block passed the full check (`XWCS\0\1`, one per block, or
@@ -45,7 +47,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use astraea_journal_codec::{Options, Row, indexed, pack_bounded, pool::Pool, unpack};
+use astraea_journal_codec::{Options, Row, pack_bounded, pool::Pool, unpack};
 use serde_json::{Value, json};
 use witness_core::ledger::LedgerHeader;
 use witness_core::sha512_half;
@@ -315,8 +317,32 @@ fn parse_seal(b: &[u8]) -> Option<Vec<Vec<[u8; 32]>>> {
     (at == rest.len()).then_some(out)
 }
 
+/// The data files a manifest lists, by their position in `names`: the
+/// archive and the kinds, and the ASIX2 indexes of an older segment.
+fn listed(m: &Value) -> Vec<(usize, &'static str)> {
+    let mut v = vec![(0, "astj"), (2, "kinds")];
+    if m["files"].get("asix").is_some() {
+        v.push((1, "asix"));
+    }
+    v
+}
+
 fn names(dir: &Path, first: u32) -> [PathBuf; 4] {
     ["astj", "asix", "kinds", "json"].map(|e| dir.join(format!("cold-{first:010}.{e}")))
+}
+
+/// Removes a file, and its target if it is a link (published segments are
+/// links into the loader's directory). A missing file is not an error.
+fn remove_with_link(p: &Path) -> Res<()> {
+    if let Ok(real) = fs::canonicalize(p)
+        && real != p
+    {
+        fs::remove_file(&real).map_err(io)?;
+    }
+    match fs::remove_file(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+        _ => Ok(()),
+    }
 }
 
 /// Exact bytes of a row in a block (as the codec counts them when cutting blocks).
@@ -365,10 +391,6 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
     if unpack(&archive)? != rows {
         return Err("ASTJ5 archive did not restore the ledgers exactly".into());
     }
-    let index = indexed::Indexes::build(&rows)?.encode();
-    if indexed::Indexes::decode(&index)?.encode() != index {
-        return Err("ASIX2 indexes did not re-encode exactly".into());
-    }
     let kinds = kinds_bytes(ledgers, mode)?;
     let k = parse_kinds(&kinds, rows.len())?;
     if mode == Kinds::Explicit {
@@ -380,7 +402,7 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
             return Err("kinds stream did not round-trip".into());
         }
     }
-    let [pa, pi, pk, pm] = names(dir, first);
+    let [pa, _, pk, pm] = names(dir, first);
     let file =
         |b: &[u8]| json!({"bytes": b.len(), "sha512half": hex::encode_upper(sha512_half(b))});
     let manifest = json!({
@@ -400,13 +422,11 @@ pub fn write_with(dir: &Path, ledgers: &[Ledger], mode: Kinds, limit: BlockLimit
         "change_kinds": mode.name(),
         "files": {
             "astj": file(&archive),
-            "asix": file(&index),
             "kinds": file(&kinds),
         },
     });
     fs::create_dir_all(dir).map_err(io)?;
     sync_write(&pa, &archive)?;
-    sync_write(&pi, &index)?;
     sync_write(&pk, &kinds)?;
     // The full check of every block, once; readers then trust the seal.
     let seal = Pool::open(&pa, 0, 1)
@@ -490,7 +510,7 @@ impl ColdSegment {
                 _ => return Err(corrupt(format!("{name}: kinds mode"))),
             };
             let paths = names(dir, first);
-            for (i, k) in ["astj", "asix", "kinds"].into_iter().enumerate() {
+            for (i, k) in listed(&m) {
                 let len = fs::metadata(&paths[i]).map_err(io)?.len();
                 if Some(len) != m["files"][k]["bytes"].as_u64() {
                     return Err(corrupt(format!("{name}: wrong size of file {k}")));
@@ -516,7 +536,7 @@ impl ColdSegment {
     /// SHA-512Half of all files, checked against the manifest. Expensive on large
     /// segments, so it runs during verification, not on every open.
     pub fn verify_files(&self) -> Res<()> {
-        for (i, k) in ["astj", "asix", "kinds"].into_iter().enumerate() {
+        for (i, k) in listed(&self.manifest) {
             let b = fs::read(&self.paths[i]).map_err(io)?;
             if Some(hex::encode_upper(sha512_half(&b)).as_str())
                 != self.manifest["files"][k]["sha512half"].as_str()
@@ -621,12 +641,13 @@ impl ColdSegment {
         };
         let m = write_with(&staging, &ledgers, self.kinds, limit)?;
         drop(ledgers);
-        let [na, ni, nk, nm] = names(&staging, self.first);
-        for (new, old) in [(&ni, &self.paths[1]), (&nk, &self.paths[2])] {
-            if fs::read(new).map_err(io)? != fs::read(old).map_err(io)? {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(corrupt(format!("{}: recoding changed it", old.display())));
-            }
+        let [na, _, nk, nm] = names(&staging, self.first);
+        if fs::read(&nk).map_err(io)? != fs::read(&self.paths[2]).map_err(io)? {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(corrupt(format!(
+                "{}: recoding changed it",
+                self.paths[2].display()
+            )));
         }
         let target = |p: &Path| -> Res<PathBuf> { fs::canonicalize(p).map_err(io) };
         fs::rename(&na, &real).map_err(io)?;
@@ -638,8 +659,39 @@ impl ColdSegment {
         fs::rename(&nm, target(&self.paths[3])?).map_err(io)?;
         File::open(dir).and_then(|d| d.sync_all()).map_err(io)?;
         fs::remove_dir_all(&staging).map_err(io)?;
+        // The new manifest no longer lists the ASIX2 indexes.
+        remove_with_link(&self.paths[1])?;
         self.close();
         Ok(m)
+    }
+
+    /// Removes the ASIX2 indexes of a segment written before 0.3: the
+    /// manifest is replaced first (via a temporary file and rename), then the
+    /// file, so a crash in between leaves only an unlisted file behind.
+    /// Returns the bytes freed; 0 if the segment has none.
+    pub fn drop_index(&self) -> Res<u64> {
+        if self.manifest["files"].get("asix").is_none() {
+            return Ok(0);
+        }
+        let bytes = self.manifest["files"]["asix"]["bytes"]
+            .as_u64()
+            .unwrap_or(0);
+        let mut m = self.manifest.clone();
+        if let Some(files) = m["files"].as_object_mut() {
+            files.remove("asix");
+        }
+        let real = fs::canonicalize(&self.paths[3]).map_err(io)?;
+        let tmp = real.with_extension("json.tmp");
+        sync_write(
+            &tmp,
+            &serde_json::to_vec_pretty(&m).map_err(|e| e.to_string())?,
+        )?;
+        fs::rename(&tmp, &real).map_err(io)?;
+        if let Some(dir) = real.parent() {
+            File::open(dir).and_then(|d| d.sync_all()).map_err(io)?;
+        }
+        remove_with_link(&self.paths[1])?;
+        Ok(bytes)
     }
 
     /// Closes the files and frees the block cache; reads in progress finish.
@@ -1077,6 +1129,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn segments_without_asix_and_older_ones_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ls = chain(100, 20);
+        let m = write(dir.path(), &ls, Kinds::Explicit).unwrap();
+        assert!(m["files"].get("asix").is_none());
+        let [_, asix, _, man] = names(dir.path(), 100);
+        assert!(!asix.exists());
+        // A segment from before 0.3: its manifest lists ASIX2 indexes.
+        let rows = ls.iter().map(row_of).collect::<Res<Vec<_>>>().unwrap();
+        let index = astraea_journal_codec::indexed::Indexes::build(&rows)
+            .unwrap()
+            .encode();
+        fs::write(&asix, &index).unwrap();
+        let mut old = m.clone();
+        old["files"]["asix"] =
+            json!({"bytes": index.len(), "sha512half": hex::encode_upper(sha512_half(&index))});
+        fs::write(&man, serde_json::to_vec(&old).unwrap()).unwrap();
+        let cold = Cold::open(dir.path()).unwrap();
+        cold.segments()[0].verify_files().unwrap();
+        // Published through a link, as the loader does.
+        let live = tempfile::tempdir().unwrap();
+        for e in ["astj", "asix", "kinds", "json"] {
+            let n = format!("cold-0000000100.{e}");
+            std::os::unix::fs::symlink(dir.path().join(&n), live.path().join(&n)).unwrap();
+        }
+        let cold = Cold::open(live.path()).unwrap();
+        assert_eq!(cold.segments()[0].drop_index().unwrap(), index.len() as u64);
+        assert!(!asix.exists() && !live.path().join("cold-0000000100.asix").exists());
+        let cold = Cold::open(live.path()).unwrap();
+        assert_eq!(cold.segments()[0].drop_index().unwrap(), 0);
+        cold.segments()[0].verify_files().unwrap();
+        assert_eq!(cold.ledger(110, true).unwrap().unwrap(), ls[10]);
+    }
+
+    #[test]
     fn ledger_larger_than_block_limit_gets_its_own_limit() {
         let dir = tempfile::tempdir().unwrap();
         let mut ls = chain(200, 6);
@@ -1275,7 +1362,7 @@ pub(crate) mod tests {
         // An older segment published through links gets its seal next to the
         // archive and a link beside the published one.
         let live = tempfile::tempdir().unwrap();
-        for e in ["astj", "asix", "kinds", "json"] {
+        for e in ["astj", "kinds", "json"] {
             let n = format!("cold-0000000300.{e}");
             std::os::unix::fs::symlink(dir.path().join(&n), live.path().join(&n)).unwrap();
         }
