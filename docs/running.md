@@ -69,10 +69,24 @@ astraea-ingest \
 | `--forward-timeout` | per-node timeout for forwarding, seconds (default 5) |
 | `--network-id` | network ID for CTIDs, 0 for mainnet |
 | `--metrics-addr` | Prometheus metrics, described in [metrics.md](metrics.md) |
+| `--max-requests` | weighted requests per client per interval; with none of the three limits, clients are not limited |
+| `--max-response-bytes` | response bytes per client per interval |
+| `--max-connections` | connections per client open at once: HTTP requests in progress and WebSocket sessions |
+| `--sweep-secs` | the interval the request and byte budgets cover, seconds (default 1) |
+| `--limit-whitelist` | addresses or CIDR networks that are never limited, comma separated |
+| `--trusted-proxies` | proxies whose `CF-Connecting-IP`, `Forwarded` or `X-Forwarded-For` header names the client, comma separated |
 
 Before the first start, take a snapshot of the full ledger state with `astraea-snapshot` (it downloads every object over gRPC and refuses the result unless the rebuilt state tree matches the header's `account_hash`) and load it with `astraea-state --db <data-dir>/state load <snapshot>`. From then on `astraea-ingest` follows the network. History before the snapshot comes from the cold store.
 
-Astraea serves at most 32 requests at once, 4 of them proofs, and gives each request 10 seconds. It doesn't terminate TLS or limit request rates per client: put it behind a reverse proxy for anything public.
+Astraea serves at most 32 requests at once, 4 of them proofs, and gives each request 10 seconds. It doesn't terminate TLS: put it behind a reverse proxy or a tunnel for anything public.
+
+### Public access
+
+Per-client limits work like Clio's `dos_guard`. A client over its request or byte budget, or at its connection cap, gets `slowDown` until the interval ends: over HTTP as status 503, over WebSocket as an error response. Requests that walk many objects count more: a proof 10, `ledger_data` and a ledger with expanded transactions 5, `account_tx`, `nft_history`, `book_changes` and `nfts_by_issuer` 2, the rest 1. Your own services go in `--limit-whitelist`.
+
+Behind a proxy every request comes from the proxy's address. List the proxy in `--trusted-proxies` (for `cloudflared` on the same host, `127.0.0.1`), and the client is taken from `CF-Connecting-IP`, the last `for=` of `Forwarded`, or the first address of `X-Forwarded-For`. These headers are ignored from anyone else, so a client can't pose as another.
+
+Answers that can never change (a transaction, or anything about a ledger named by sequence or hash) carry `Cache-Control: public, max-age=86400, immutable`; the rest carry `no-store`. JSON-RPC requests are POSTs, which CDNs don't cache by default, so an edge cache needs a rule or worker that keys on the request body; the header tells it what it may keep.
 
 ## Loading older history
 

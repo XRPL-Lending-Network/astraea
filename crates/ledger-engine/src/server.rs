@@ -17,14 +17,23 @@
 //! Node methods and requests about the current ledger (`forward::forwarded`) go to
 //! xrpld; the response follows Clio:
 //! the node's `result` as is, with `forwarded: true`, `status`, `type` on top.
+//!
+//! Clients are limited per address by `guard` when it is configured.
+//!
+//! HTTP answers say whether they can be cached: an answer about a ledger named
+//! by sequence or hash, or about a transaction, never changes once given, and
+//! gets `Cache-Control: public, max-age=86400, immutable`; everything else
+//! gets `no-store`. A cache in front can rely on that. JSON-RPC requests are
+//! POSTs, which CDNs don't cache on their own, so the cache keys on the body.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::SinkExt;
@@ -34,6 +43,7 @@ use tracing::{info, warn};
 
 use crate::api::{Engine, RpcError, api_version};
 use crate::forward::{Forwarder, forwarded, node_info};
+use crate::guard::{Guard, GuardConfig, weight};
 use crate::metrics::{self, lock};
 use crate::subs::{self, Hub};
 
@@ -45,6 +55,9 @@ const MAX_PROOFS: usize = 4;
 const REQUEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Built bundles per ledger and transaction kept in memory; they never change.
 const PROOF_CACHE: usize = 128;
+/// How long a cache may keep an answer that never changes. A day rather than
+/// a year, so a wrong answer, should one ever be served, doesn't outlive a fix.
+const IMMUTABLE: &str = "public, max-age=86400, immutable";
 
 type ProofCache = std::sync::Mutex<std::collections::VecDeque<(String, Map<String, Value>)>>;
 
@@ -57,6 +70,75 @@ struct Shared {
     forwarder: Option<Arc<Forwarder>>,
     hub: Arc<Hub>,
     metrics: metrics::Shared,
+    guard: Arc<Guard>,
+}
+
+fn slow_down() -> RpcError {
+    RpcError {
+        error: "slowDown",
+        code: 10,
+        message: "You are placing too much load on the server.".into(),
+    }
+}
+
+/// Clio's answer to a client over its limit over HTTP: 503 with the error.
+fn slow_down_http() -> Response {
+    let e = slow_down();
+    let body = json!({
+        "error": e.error,
+        "error_code": e.code,
+        "error_message": e.message,
+        "status": "error",
+        "type": "response",
+    });
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        [(axum::http::header::CONTENT_TYPE, "text/plain")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// Methods whose answer depends only on the ledger asked for.
+const FIXED_BY_LEDGER: [&str; 18] = [
+    "account_info",
+    "account_lines",
+    "account_nfts",
+    "account_objects",
+    "account_offers",
+    "account_tx",
+    "book_changes",
+    "ledger",
+    "ledger_data",
+    "ledger_entry",
+    "mpt_holders",
+    "nft_buy_offers",
+    "nft_history",
+    "nft_info",
+    "nft_sell_offers",
+    "nfts_by_issuer",
+    "proof_entry",
+    "proof_ledger",
+];
+
+/// Whether a successful answer of our own can never change: about a
+/// transaction, or about a ledger named by sequence or hash. Errors and
+/// forwarded answers can.
+fn immutable(method: &str, params: &Map<String, Value>, result: &Result<Reply, RpcError>) -> bool {
+    if !matches!(result, Ok(Reply::Own(_))) {
+        return false;
+    }
+    let fixed = params.get("ledger_hash").is_some_and(Value::is_string)
+        || params
+            .get("ledger_index")
+            .is_some_and(|v| v.is_u64() || v.as_str().is_some_and(|s| s.parse::<u32>().is_ok()));
+    match method {
+        "tx" | "proof_tx" => true,
+        // A range bound alongside the ledger is an error anyway; a marker
+        // pages within the same fixed ledger.
+        m if FIXED_BY_LEDGER.contains(&m) => fixed,
+        _ => false,
+    }
 }
 
 /// Counts a finished request and its response. A method name a client made up
@@ -269,7 +351,17 @@ async fn call_own(
     result
 }
 
-async fn http_rpc(State(s): State<Shared>, body: String) -> Response {
+async fn http_rpc(
+    State(s): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let client = s.guard.client(peer.ip(), &headers);
+    let Some(_connection) = s.guard.connect(client) else {
+        record(&s, "http", "", &Err(slow_down()), Instant::now(), 0);
+        return slow_down_http();
+    };
     let request: Value = match serde_json::from_str(&body) {
         Ok(v @ Value::Object(_)) => v,
         _ => {
@@ -286,14 +378,25 @@ async fn http_rpc(State(s): State<Shared>, body: String) -> Response {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let result = match params_of(request.get("params")) {
-        Ok(p) if !method.is_empty() => call(&s, method.clone(), p).await,
+    let params = params_of(request.get("params"));
+    if let Ok(p) = &params
+        && !s.guard.request(client, weight(&method, p))
+    {
+        record(&s, "http", &method, &Err(slow_down()), started, 0);
+        return slow_down_http();
+    }
+    let result = match &params {
+        Ok(p) if !method.is_empty() => call(&s, method.clone(), p.clone()).await,
         Ok(_) => Err(RpcError {
             error: "unknownCmd",
             code: 32,
             message: "Unknown method.".into(),
         }),
-        Err(e) => Err(e),
+        Err(e) => Err(e.clone()),
+    };
+    let cache = match &params {
+        Ok(p) if immutable(&method, p, &result) => IMMUTABLE,
+        _ => "no-store",
     };
     let body = match &result {
         Ok(Reply::Own(m)) => {
@@ -312,18 +415,39 @@ async fn http_rpc(State(s): State<Shared>, body: String) -> Response {
     }
     .to_string();
     record(&s, "http", &method, &result, started, body.len());
+    s.guard.sent(client, body.len());
     (
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, cache),
+        ],
         body,
     )
         .into_response()
 }
 
-async fn ws_upgrade(State(s): State<Shared>, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| ws_session(s, socket))
+async fn ws_upgrade(
+    State(s): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let client = s.guard.client(peer.ip(), &headers);
+    if s.guard.connect(client).is_none() {
+        record(&s, "ws", "", &Err(slow_down()), Instant::now(), 0);
+        return slow_down_http();
+    }
+    ws.on_upgrade(move |socket| ws_session(s, socket, client))
 }
 
-async fn ws_session(s: Shared, mut socket: WebSocket) {
+async fn ws_session(s: Shared, mut socket: WebSocket, client: std::net::IpAddr) {
+    // The session holds a connection slot for as long as it is open. A client
+    // that reached its cap between the upgrade check and here is closed.
+    let guard = s.guard.clone();
+    let Some(_connection) = guard.connect(client) else {
+        let _ = socket.close().await;
+        return;
+    };
     let (id, mut rx) = s.hub.join();
     {
         let mut m = lock(&s.metrics);
@@ -345,7 +469,7 @@ async fn ws_session(s: Shared, mut socket: WebSocket) {
                     Some(Err(_)) | None => break,
                     Some(Ok(_)) => continue,
                 };
-                let reply = ws_answer(&s, id, &text).await;
+                let reply = ws_answer(&s, id, &text, client).await;
                 if socket.send(Message::Text(reply)).await.is_err() {
                     break;
                 }
@@ -400,7 +524,7 @@ async fn subscription(
     .map(Reply::Own)
 }
 
-async fn ws_answer(s: &Shared, id: u64, text: &str) -> String {
+async fn ws_answer(s: &Shared, id: u64, text: &str, client: std::net::IpAddr) -> String {
     let started = Instant::now();
     let Ok(Value::Object(request)) = serde_json::from_str::<Value>(text) else {
         let e = bad_syntax();
@@ -420,7 +544,9 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> String {
     for k in ["command", "method", "id"] {
         params.remove(k);
     }
-    let result = if method == "subscribe" || method == "unsubscribe" {
+    let result = if !s.guard.request(client, weight(&method, &params)) {
+        Err(slow_down())
+    } else if method == "subscribe" || method == "unsubscribe" {
         subscription(s, id, &method, &params).await
     } else {
         call(s, method.clone(), params).await
@@ -463,11 +589,27 @@ async fn ws_answer(s: &Shared, id: u64, text: &str) -> String {
     m.insert("warnings".into(), warnings());
     let body = Value::Object(m).to_string();
     record(s, "ws", &method, &result, started, body.len());
+    s.guard.sent(client, body.len());
     body
 }
 
 /// The API routes over one set of subscriptions, which starts publishing here.
-fn app(engine: Arc<Engine>, forwarder: Option<Arc<Forwarder>>, metrics: metrics::Shared) -> Router {
+fn app(
+    engine: Arc<Engine>,
+    forwarder: Option<Arc<Forwarder>>,
+    metrics: metrics::Shared,
+    guard: GuardConfig,
+) -> Router {
+    let guard = Arc::new(Guard::new(guard));
+    if let Some(every) = guard.sweep_every() {
+        let g = guard.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                g.sweep();
+            }
+        });
+    }
     let shared = Shared {
         engine,
         inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
@@ -476,6 +618,7 @@ fn app(engine: Arc<Engine>, forwarder: Option<Arc<Forwarder>>, metrics: metrics:
         forwarder,
         hub: Arc::new(Hub::default()),
         metrics,
+        guard,
     };
     tokio::spawn(subs::run(shared.engine.clone(), shared.hub.clone()));
     tokio::spawn(sample(shared.clone()));
@@ -517,8 +660,9 @@ pub async fn serve(
     engine: Arc<Engine>,
     forwarder: Option<Arc<Forwarder>>,
     metrics: metrics::Shared,
+    guard: GuardConfig,
 ) {
-    let app = app(engine, forwarder, metrics);
+    let app = app(engine, forwarder, metrics, guard);
     for addr in addrs {
         let app = app.clone();
         tokio::spawn(async move {
@@ -526,7 +670,10 @@ pub async fn serve(
                 match tokio::net::TcpListener::bind(addr).await {
                     Ok(listener) => {
                         info!("API at http://{addr}/ and ws://{addr}/");
-                        if let Err(e) = axum::serve(listener, app.clone()).await {
+                        let svc = app
+                            .clone()
+                            .into_make_service_with_connect_info::<SocketAddr>();
+                        if let Err(e) = axum::serve(listener, svc).await {
                             warn!("API: {e}");
                         }
                     }
@@ -546,6 +693,108 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::CloseFrame;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+    fn test_engine(dir: &std::path::Path) -> Engine {
+        Engine {
+            state: Arc::new(crate::state::StateStore::open(&dir.join("state")).unwrap()),
+            blocks: crate::history::HistoryReader::open(&dir.join("history")).unwrap(),
+            network_id: 0,
+            started: Instant::now(),
+            confirmer: None,
+            quorum: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_client_over_its_budget_gets_slow_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = metrics::Shared::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let guard = GuardConfig {
+            max_requests: Some(2),
+            sweep: std::time::Duration::from_secs(3600),
+            ..GuardConfig::default()
+        };
+        let routes = app(
+            Arc::new(test_engine(dir.path())),
+            None,
+            metrics.clone(),
+            guard,
+        )
+        .into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move { axum::serve(listener, routes).await });
+        let got = tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            (0..3)
+                .map(|_| {
+                    let mut r = agent
+                        .post(&format!("http://{addr}/"))
+                        .send(r#"{"method":"ping"}"#)
+                        .unwrap();
+                    let cache = r
+                        .headers()
+                        .get("cache-control")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_owned();
+                    (
+                        r.status().as_u16(),
+                        cache,
+                        r.body_mut().read_to_string().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap();
+        assert_eq!((got[0].0, got[0].1.as_str()), (200, "no-store"));
+        assert_eq!(got[1].0, 200);
+        assert_eq!(got[2].0, 503);
+        assert!(got[2].2.contains(r#""error":"slowDown""#), "{}", got[2].2);
+        assert_eq!(
+            lock(&metrics)
+                .api
+                .requests
+                .get(&("http", "ping".into(), "slowDown".into())),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn only_answers_that_cannot_change_are_cacheable() {
+        let ok = Ok(Reply::Own(Map::new()));
+        let p = |v: Value| v.as_object().cloned().unwrap();
+        assert!(immutable("tx", &Map::new(), &ok));
+        assert!(immutable("ledger", &p(json!({"ledger_index": 5})), &ok));
+        assert!(immutable(
+            "account_info",
+            &p(json!({"ledger_index": "5"})),
+            &ok
+        ));
+        assert!(immutable(
+            "ledger_entry",
+            &p(json!({"ledger_hash": "AB"})),
+            &ok
+        ));
+        assert!(!immutable(
+            "ledger",
+            &p(json!({"ledger_index": "validated"})),
+            &ok
+        ));
+        assert!(!immutable("account_info", &Map::new(), &ok));
+        assert!(!immutable(
+            "server_info",
+            &p(json!({"ledger_index": 5})),
+            &ok
+        ));
+        assert!(!immutable("tx", &Map::new(), &Err(slow_down())));
+        let fwd = Ok(Reply::Forwarded(Map::new()));
+        assert!(!immutable("ledger", &p(json!({"ledger_index": 5})), &fwd));
+    }
+
     #[tokio::test]
     async fn a_client_close_is_answered_and_requests_are_counted() {
         let dir = tempfile::tempdir().unwrap();
@@ -560,7 +809,13 @@ mod tests {
         let metrics = metrics::Shared::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let routes = app(Arc::new(engine), None, metrics.clone());
+        let routes = app(
+            Arc::new(engine),
+            None,
+            metrics.clone(),
+            GuardConfig::default(),
+        )
+        .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, routes).await });
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await

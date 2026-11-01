@@ -11,6 +11,7 @@
 //! - `proof`: Proof API, evidence bundles for a ledger, transaction or object;
 //! - `selector`: the object key from `ledger_entry` params (all selectors of Clio 2.8);
 //! - `server`: HTTP JSON-RPC and WebSocket for `api`;
+//! - `guard`: request limits per client, like Clio's DOS guard;
 //! - `source`: xrpld gRPC client (same as Clio: `GetLedger` with objects);
 //! - `limits`: the time limit of one request;
 //! - `ledger`: a whole ledger, its verification and serialization for the log;
@@ -39,6 +40,7 @@ pub mod coldindex;
 pub mod confirm;
 pub mod delta;
 pub mod forward;
+pub mod guard;
 pub mod history;
 pub mod index;
 pub mod ledger;

@@ -99,6 +99,26 @@ struct Args {
     /// Per-node timeout when forwarding, in seconds.
     #[arg(long, default_value_t = 5)]
     forward_timeout: u64,
+    /// Request limits per client (`guard`), like Clio's dos_guard: weighted
+    /// requests per sweep. Off if none of the three limits is given.
+    #[arg(long)]
+    max_requests: Option<u64>,
+    /// Response bytes per client per sweep.
+    #[arg(long)]
+    max_response_bytes: Option<u64>,
+    /// Connections per client open at once.
+    #[arg(long)]
+    max_connections: Option<u32>,
+    /// Length of the interval the request and byte budgets cover, in seconds.
+    #[arg(long, default_value_t = 1)]
+    sweep_secs: u64,
+    /// Addresses or networks (CIDR) that are never limited, comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    limit_whitelist: Vec<ledger_engine::guard::Net>,
+    /// Proxies whose CF-Connecting-IP, Forwarded or X-Forwarded-For name the
+    /// client, comma-separated (for a tunnel on the same host: 127.0.0.1).
+    #[arg(long, value_delimiter = ',')]
+    trusted_proxies: Vec<ledger_engine::guard::Net>,
     /// Network NetworkID for ctid: 0 is mainnet.
     #[arg(long, default_value_t = 0)]
     network_id: u32,
@@ -614,11 +634,29 @@ async fn run(args: Args) -> Result<(), String> {
                 }
             }
         });
+        let guard = ledger_engine::guard::GuardConfig {
+            max_requests: args.max_requests,
+            max_bytes: args.max_response_bytes,
+            max_connections: args.max_connections,
+            sweep: Duration::from_secs(args.sweep_secs.max(1)),
+            whitelist: args.limit_whitelist.clone(),
+            trusted_proxies: args.trusted_proxies.clone(),
+        };
+        if guard.enabled() {
+            info!(
+                "client limits: {:?} requests, {:?} bytes per {} s, {:?} connections",
+                guard.max_requests,
+                guard.max_bytes,
+                guard.sweep.as_secs(),
+                guard.max_connections
+            );
+        }
         tokio::spawn(server::serve(
             args.api_addr.clone(),
             engine,
             forwarder,
             metrics.clone(),
+            guard,
         ));
     }
     // Tree history below the ledger it started at, rebuilt in the background
