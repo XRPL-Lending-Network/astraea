@@ -4,7 +4,7 @@
 
 Astraea is a history server for the XRP Ledger. It speaks the same JSON-RPC and WebSocket API as [Clio](https://github.com/XRPLF/clio), so an existing client can point at it without changes. It stores the whole public history, back to ledger 32571, in a compact format of its own. It can also hand you a package of evidence for any ledger, transaction or state object, which you can check on your own machine without trusting Astraea or any node.
 
-The project is at version 0.3: it answers everything Clio answers, over the full history, and has the limits a public server needs. Its answers have been compared with Clio on recorded production traffic, request by request. Expect rough edges in the docs and tooling more than in the data path.
+The project is at version 0.4: it answers everything Clio answers, over the full history, and has the limits a public server needs. Its answers have been compared with Clio on recorded production traffic, request by request. Expect rough edges in the docs and tooling more than in the data path.
 
 ## Why another history server
 
@@ -29,6 +29,10 @@ The **Ledger Engine** loads validated ledgers from xrpld over gRPC, the same way
 The **Proof Engine** listens to the validations stream, checks each signature as it arrives, and decides whether a ledger reached quorum using the UNL lists that were valid for that ledger's close time. It doesn't take the node's word for "validated".
 
 Both feed the API. More detail in [docs/architecture.md](docs/architecture.md).
+
+## How it differs from Clio
+
+Clio keeps history in a database server. Astraea keeps it in files, in a codec built for XRPL's binary objects, read by the server itself. On the same ledgers on one host, history takes about a third of the disk Clio needs, and no database runs next to it. Clio is still slightly faster on deep pages of old history, because Astraea has to decode blocks to read them. The method, the numbers and the cases where Clio is ahead are in [docs/compared-with-clio.md](docs/compared-with-clio.md).
 
 ## What you can ask it
 
@@ -55,7 +59,7 @@ A package for a transaction carries the validations that put an anchor ledger ov
 | Crate | What it is |
 |---|---|
 | `crates/ledger-engine` | Loader, hot and cold history, indexes, the API server (`astraea-ingest`), maintenance tools (`astraea-state`, `astraea-xrpla`) |
-| `crates/astj5` | ASTJ5, the cold-history codec: segment format, block pool, ASIX indexes |
+| `crates/astj5` | ASTJ, the cold-history codec: segment format and block pool |
 | `crates/witness-core` | XRPL primitives with no I/O: hashing, STObject parsing, keys and signatures, manifests, UNL lists, SHAMap proofs, quorum rules, evidence packages |
 | `crates/witness-archiver` | Archives raw signed validations from a node into sealed segments |
 | `crates/witness-unl` | Polls UNL publishers and keeps every signed list it has seen |
@@ -80,7 +84,7 @@ Running a node of your own is covered in [docs/running.md](docs/running.md). The
 
 ## Status and plans
 
-Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs. What comes next is in [ROADMAP.md](ROADMAP.md).
+Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs; 0.4 made the history smaller and took out the code production never used. What comes next is in [ROADMAP.md](ROADMAP.md).
 
 ### Full history
 

@@ -31,9 +31,13 @@ Released.
 - A time limit for every request.
 - The rest of Clio's surface: `book_changes`, the NFT methods, and the `validations` and `manifests` streams.
 
-## Done, not yet released
+## 0.4: smaller and simpler
+
+Released.
 
 - Smaller cold history: about 208 bytes per transaction with indexes across all of history, below the target of 217.
+- A fifth less code: the research code and finished benchmarks that production never used are gone, and the codec follows the same lint rules as everything else.
+- A comparison with Clio, including where Clio is ahead: [docs/compared-with-clio.md](docs/compared-with-clio.md).
 
 ## Next: a public endpoint
 

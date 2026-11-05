@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
+- The research code that production never used is gone: experiments and measuring tools in the codec package, and finished benchmarks in the engine. That is 46,716 lines of Rust down to 37,092 and 25 binaries down to 7. No format or answer changes. Builds from before and after the cleanup read seven mainnet segments (2.42 million transactions) with identical digests, and rewrote each one byte for byte the same as the file on disk.
+- The codec follows the workspace lints. Its 21 `unwrap` calls are gone, and a damaged block whose template points outside the pool now returns an error instead of panicking.
+- `write_atomic`, `now_ms` and the varint code each live in one place. The archiver's manifest write used a copy that did not sync the directory, so a crash could lose a manifest it had just replaced; it now syncs.
+- Updated axum to 0.8, tonic to 0.14, prost to 0.14 and tokio-tungstenite to 0.29. Together with the cleanup, `Cargo.lock` went from 282 packages to 277 and from 26 duplicated packages to 20. Unit tests pass; this was not yet run against a live node.
+- [docs/compared-with-clio.md](docs/compared-with-clio.md) compares Astraea with Clio on one host, including where Clio is ahead.
 - Cold segments store a state patch only where the metadata doesn't give it. The object after the last transaction that touched it follows from that transaction's node, so most patches can be rebuilt on reading: a new page of a directory usually holds just the object its transaction created, and xrpld's unlisted default fields are filled in. On seven mainnet segments from different years (3.27 million transactions) the segments went from 238.0 to 216.2 bytes per transaction, keeping 4 to 28% of the patches as entries. Every ledger came back byte for byte. With the whole mainnet history rewritten this way and the ASIX2 indexes gone, its 5.18 billion transactions take 199 bytes each in segments and 208 with indexes, down from 251 when the full load finished. `astraea-state history-cold-recode DIR` rewrites older segments while the server runs. They are format `astraea-cold/2`, which earlier versions refuse, so upgrade the server first. A block now holds more transactions: reading one uncached transaction took about 7% longer (0.13 ms), and rebuilding a ledger's patches about 1 ms.
 
 ## 0.3.0
