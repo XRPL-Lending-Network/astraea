@@ -3,7 +3,7 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fds = protox::compile(["org/xrpl/rpc/v1/xrp_ledger.proto"], ["proto"])?;
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(false)
         .compile_fds(fds)?;
     println!("cargo:rerun-if-changed=proto");

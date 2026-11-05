@@ -37,17 +37,18 @@ clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "net", "io-util", "sync"] }
-tonic = "0.12"
-prost = "0.13"
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
 fjall = "3.1.12"
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 sha2.workspace = true
 ureq.workspace = true
 ed25519-dalek.workspace = true
 
 [build-dependencies]
-tonic-build = { version = "0.12", default-features = false, features = ["prost", "transport"] }
-protox = "0.7"
+tonic-prost-build = "0.14"
+protox = "0.9"
 
 [dev-dependencies]
 tempfile.workspace = true

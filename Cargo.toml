@@ -23,7 +23,7 @@ serde_json = "1"
 zstd = "0.14.3"
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "time", "signal", "net"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"

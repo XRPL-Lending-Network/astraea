@@ -470,14 +470,14 @@ async fn ws_session(s: Shared, mut socket: WebSocket, client: std::net::IpAddr) 
                     Some(Ok(_)) => continue,
                 };
                 let reply = ws_answer(&s, id, &text, client).await;
-                if socket.send(Message::Text(reply)).await.is_err() {
+                if socket.send(Message::Text(reply.into())).await.is_err() {
                     break;
                 }
             }
             out = rx.recv() => {
                 // Queue closed: the session was disconnected for falling behind.
                 let Some(out) = out else { break };
-                if socket.send(Message::Text(out)).await.is_err() {
+                if socket.send(Message::Text(out.into())).await.is_err() {
                     break;
                 }
             }
