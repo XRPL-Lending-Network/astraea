@@ -24,7 +24,7 @@ The signatures and the UNL lists are archived next to the data, byte for byte as
   <img src="assets/architecture.svg" alt="Sources feed the Ledger Engine and the Proof Engine, which serve the Clio-compatible API and the Proof API" width="100%">
 </p>
 
-The **Ledger Engine** loads validated ledgers from xrpld over gRPC, the same way Clio does. Recent ledgers live in a hot store together with the full account state at every ledger. Older history is packed into cold ASTJ6 segments. With all of its indexes (transaction by hash, ledger by hash, account history) the whole mainnet history takes about 251 bytes per transaction on disk.
+The **Ledger Engine** loads validated ledgers from xrpld over gRPC, the same way Clio does. Recent ledgers live in a hot store together with the full account state at every ledger. Older history is packed into cold ASTJ6 segments. With all of its indexes (transaction by hash, ledger by hash, account history) the whole mainnet history takes about 208 bytes per transaction on disk.
 
 The **Proof Engine** listens to the validations stream, checks each signature as it arrives, and decides whether a ledger reached quorum using the UNL lists that were valid for that ledger's close time. It doesn't take the node's word for "validated".
 
@@ -86,7 +86,7 @@ Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proo
 
 The whole public history is loaded, from ledger 32571 (1 January 2013) to the current ledger. The archive was loaded from the newest ledger down, in chunks of 32768 ledgers; each chunk was checked and written as cold segments, and groups of chunks got their indexes and became visible in the API without a restart. The load finished on 30 October 2026.
 
-On disk, the 5.18 billion transactions of the cold history take 1.30 TB: 1.26 TB of cold segments, about 243 bytes per transaction, and 44 GB of indexes, about 9 bytes per transaction. That is 251 bytes per transaction in total. Recent ledgers cost a little more than the average: across the last two and a half years it was 259 bytes per transaction.
+On disk, the 5.18 billion transactions of the cold history take 1.08 TB: 1.03 TB of cold segments, about 199 bytes per transaction, and 44 GB of indexes, about 9 bytes per transaction. That is 208 bytes per transaction in total, measured in November 2026 after the whole history was rewritten in the `astraea-cold/2` format. The load itself ended at 251 bytes per transaction. The cost of the segments depends on the era: about 158 bytes per transaction for ledgers 30 to 60 million, 229 for ledgers 60 to 85 million, and 205 from ledger 85 million on.
 
 ## License
 

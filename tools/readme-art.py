@@ -1,8 +1,8 @@
 """Generates the animated README graphics in assets/.
 
-Dark cards, a serif display headline, sans UI text, a dotted globe of
-meridians fading from dusty rose to green, and accent dots from the logo
-palette. Everything animates with SMIL and CSS only: GitHub renders README
+Dark cards, a serif display headline, sans UI text, a globe of scrolling
+hashes with a rim fading from dusty rose to green, and accent dots from the
+logo palette. Everything animates with SMIL and CSS only: GitHub renders README
 SVGs through <img>, which allows no scripts and no external fonts.
 
     python3 tools/readme-art.py            # writes assets/*.svg
@@ -93,25 +93,7 @@ def hero():
     W, H = 1200, 480
     cx, cy, R = 930, 236, 188
 
-    # The sphere: a shaded body, a slowly turning grid, and what it stores
-    # inside: hash lines scrolling up, a Merkle tree whose leaves prove up to
-    # the root, and a chain of ledger blocks orbiting the core.
-    period = 40
-    steps = 24
-    rx_vals = ";".join(f(R * abs(math.cos(math.pi * i / steps))) for i in range(steps + 1))
-    n = 12
-    meridians = []
-    for k in range(n):
-        anim = (f'<animate attributeName="rx" values="{rx_vals}" dur="{period}s" '
-                f'begin="{f(-period * k / n)}s" repeatCount="indefinite"/>')
-        rx0 = R * abs(math.cos(math.pi * k / n))
-        meridians.append(f'<ellipse cx="{cx}" cy="{cy}" rx="{f(rx0)}" ry="{R}" class="grid dots m">{anim}</ellipse>')
-    parallels = []
-    for lat in (-60, -30, 0, 30, 60):
-        y = cy + R * math.sin(math.radians(lat))
-        rx = R * math.cos(math.radians(lat))
-        parallels.append(f'<ellipse cx="{cx}" cy="{f(y)}" rx="{f(rx)}" ry="{f(rx * 0.16)}" class="grid"/>')
-
+    # The sphere: a shaded body and what it stores inside, hash lines scrolling up.
     lines = hashes(24, "astraea")
     step_y = 21
     block = "".join(
@@ -120,63 +102,7 @@ def hero():
     scroll = (f'<animateTransform attributeName="transform" type="translate" from="0 0" '
               f'to="0 {-step_y * len(lines)}" dur="60s" repeatCount="indefinite"/>')
 
-    # Merkle tree: 8 leaves, 3 levels, root near the top of the core.
-    top, bottom, spread = cy - 84, cy + 74, 220
-    levels = []
-    for lv in range(4):
-        count = 2 ** (3 - lv)
-        y = bottom - lv * (bottom - top) / 3
-        xs = [cx - spread / 2 + spread * (i + 0.5) / count for i in range(count)]
-        levels.append([(x, y) for x in xs])
-    edges, nodes = [], []
-    for lv in range(3):
-        for i, (x, y) in enumerate(levels[lv]):
-            px, py = levels[lv + 1][i // 2]
-            edges.append(f'<path d="M{f(x)} {f(y)} L{f(px)} {f(py)}" class="edge"/>')
-    for lv, row in enumerate(levels):
-        for x, y in row:
-            r = 4.2 if lv == 3 else 3
-            nodes.append(f'<circle cx="{f(x)}" cy="{f(y)}" r="{r}" fill="{PANEL}" stroke="{INK}" stroke-opacity=".8" stroke-width="1.1"/>')
-    rx_, ry_ = levels[3][0]
-    proofs = []
-    for j, (leaf, col) in enumerate([(1, "yellow"), (6, "magenta"), (3, "blue"), (4, "coral")]):
-        pts, i = [], leaf
-        for lv in range(4):
-            pts.append(levels[lv][i])
-            i //= 2
-        d = "M" + " L".join(f"{f(x)} {f(y)}" for x, y in pts)
-        # Four proofs take turns, one every 2.4 s: each is drawn for the
-        # first quarter of a 9.6 s cycle and hidden for the rest.
-        cyc, begin = 9.6, j * 2.4
-        proofs.append(
-            f'<path d="{d}" fill="none" stroke="{DOTS[col]}" stroke-width="1.6" opacity="0">'
-            f'<animate attributeName="opacity" values="0;.9;.9;0;0" keyTimes="0;.04;.2;.25;1" dur="{cyc}s" '
-            f'begin="{f(begin)}s" repeatCount="indefinite"/></path>'
-            f'<circle r="3.2" fill="{DOTS[col]}" opacity="0">'
-            f'<animateMotion path="{d}" dur="{cyc}s" begin="{f(begin)}s" repeatCount="indefinite" '
-            f'calcMode="spline" keyPoints="0;1;1" keyTimes="0;.25;1" keySplines=".5 0 .3 1;0 0 1 1"/>'
-            f'<animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;.03;.22;.25;1" dur="{cyc}s" '
-            f'begin="{f(begin)}s" repeatCount="indefinite"/></circle>')
-    root_ring = "".join(
-        f'<circle cx="{f(rx_)}" cy="{f(ry_)}" r="4" fill="none" stroke="{GREEN}" stroke-width="1.2">'
-        f'<animate attributeName="r" values="4;22" dur="2.4s" begin="{f(b)}s" repeatCount="indefinite"/>'
-        f'<animate attributeName="opacity" values=".9;0" dur="2.4s" begin="{f(b)}s" repeatCount="indefinite"/></circle>'
-        for b in (2.4,))
-
-    # Ledger blocks on a tilted orbit around the core: the chain itself.
-    orx, ory, tilt = R * 0.9, R * 0.2, -20
-    orbit = f"M{f(cx - orx)} {cy} A{f(orx)} {f(ory)} 0 1 1 {f(cx + orx)} {cy} A{f(orx)} {f(ory)} 0 1 1 {f(cx - orx)} {cy}"
-    blocks = []
-    palette = ["green", "yellow", "blue", "magenta", "coral", "violet", "green", "blue"]
-    dur = 28
-    for i, col in enumerate(palette):
-        begin = -dur * i / len(palette)
-        blocks.append(
-            f'<g><rect x="-6.5" y="-6.5" width="13" height="13" rx="2.5" fill="{PANEL}" stroke="{INK}" stroke-opacity=".6" stroke-width="1"/>'
-            f'<rect x="-2.5" y="-2.5" width="5" height="5" rx="1" fill="{DOTS[col]}"/>'
-            f'<animateMotion path="{orbit}" dur="{dur}s" begin="{f(begin)}s" repeatCount="indefinite"/></g>')
-
-    stats = [("History from ledger", "32,571"), ("Confirmed by", "80% of the UNL"), ("Cold storage", "~251 B / tx")]
+    stats = [("History from ledger", "32,571"), ("Confirmed by", "80% of the UNL"), ("Cold storage", "~208 B / tx")]
     stat_svg = []
     for i, (label, value) in enumerate(stats):
         x = 64 + i * 178
@@ -194,20 +120,11 @@ def hero():
     mark, mark_w = wordmark(64, 70, slant=9)
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-labelledby="t d">
   <title id="t">Astraea by Lending Network</title>
-  <desc id="d">XRPL history you can check yourself. A sphere holds the history: hash lines scroll inside it, a chain of ledger blocks orbits its core, and leaves of a Merkle tree prove their way up to the root.</desc>
+  <desc id="d">XRPL history you can check yourself. A sphere holds the history: lines of ledger hashes scroll inside it.</desc>
   <style>{STYLE_BASE}
-    .grid {{ fill: none; stroke: url(#globe); stroke-width: .8; opacity: .32; }}
-    .dots {{ stroke-width: 2.2; stroke-linecap: round; stroke-dasharray: 0 12; opacity: .45; animation: crawl 4s linear infinite; }}
-    @keyframes crawl {{ to {{ stroke-dashoffset: -24; }} }}
     .hash {{ font-size: 11px; letter-spacing: 1.2px; fill: {SAGE}; }}
-    .edge {{ stroke: {SAGE}; stroke-width: 1.1; opacity: .8; }}
   </style>
   <defs>
-    <linearGradient id="globe" gradientUnits="userSpaceOnUse" x1="{cx - R}" y1="0" x2="{cx + R}" y2="0">
-      <stop offset=".05" stop-color="{ROSE}"/>
-      <stop offset=".55" stop-color="{SAGE}"/>
-      <stop offset=".95" stop-color="{GREEN}"/>
-    </linearGradient>
     <radialGradient id="body" cx="{cx - R * .35}" cy="{cy - R * .4}" r="{R * 1.35}" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#17231c"/>
       <stop offset=".55" stop-color="#0e1411"/>
@@ -217,13 +134,9 @@ def hero():
       <stop offset=".78" stop-color="{GREEN}" stop-opacity=".07"/>
       <stop offset="1" stop-color="{GREEN}" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="core" cx="{f(rx_)}" cy="{f(ry_)}" r="40" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="{GREEN}" stop-opacity=".25"/>
-      <stop offset="1" stop-color="{GREEN}" stop-opacity="0"/>
-    </radialGradient>
     <radialGradient id="fadeHash" cx="{cx}" cy="{cy}" r="{R}" gradientUnits="userSpaceOnUse">
-      <stop offset=".2" stop-color="#fff" stop-opacity=".55"/>
-      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+      <stop offset=".45" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity=".12"/>
     </radialGradient>
     <mask id="inside"><circle cx="{cx}" cy="{cy}" r="{R - 4}" fill="url(#fadeHash)"/></mask>
     <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
@@ -237,14 +150,7 @@ def hero():
 
   <circle cx="{cx}" cy="{cy}" r="{f(R * 1.25)}" fill="url(#halo)"/>
   <circle cx="{cx}" cy="{cy}" r="{R}" fill="url(#body)"/>
-  <g mask="url(#inside)" opacity=".5"><g>{block}{scroll}</g></g>
-  <g>{''.join(parallels)}{''.join(meridians)}</g>
-  <path d="{orbit}" transform="rotate({tilt} {cx} {cy})" fill="none" stroke="{INK}" stroke-opacity=".14" stroke-dasharray="2 5"/>
-  <circle cx="{f(rx_)}" cy="{f(ry_)}" r="40" fill="url(#core)"/>
-  <g>{''.join(edges)}{''.join(nodes)}</g>
-  {''.join(proofs)}
-  {root_ring}
-  <g transform="rotate({tilt} {cx} {cy})">{''.join(blocks)}</g>
+  <g mask="url(#inside)" opacity=".8"><g>{block}{scroll}</g></g>
   <circle cx="{cx}" cy="{cy}" r="{R}" fill="none" stroke="url(#rim)" stroke-width="1.2"/>
 
   {mark}
@@ -287,8 +193,8 @@ def architecture():
 
     parts.append(box(350, 86, 300, 198, "Ledger Engine",
                      ["tx tree must match the header root", "parent hash chain, state root per ledger",
-                      "", "hot store: recent ledgers and state", "cold store: ASTJ5 segments,",
-                      "about 240 bytes per transaction"], edge="#2c3d31", title_class="serif", tsize=19))
+                      "", "hot store: recent ledgers and state", "cold store: ASTJ6 segments,",
+                      "about 208 bytes per transaction"], edge="#2c3d31", title_class="serif", tsize=19))
     parts.append(box(350, 326, 300, 198, "Proof Engine",
                      ["every signature checked on arrival", "UNL in force at the ledger's time",
                       "", "80% of the full UNL, for every", "list combination that applies,",

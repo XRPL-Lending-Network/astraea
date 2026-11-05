@@ -31,6 +31,10 @@ Released.
 - A time limit for every request.
 - The rest of Clio's surface: `book_changes`, the NFT methods, and the `validations` and `manifests` streams.
 
+## Done, not yet released
+
+- Smaller cold history: about 208 bytes per transaction with indexes across all of history, below the target of 217.
+
 ## Next: a public endpoint
 
 - Serving the public behind a tunnel that terminates TLS, with an edge cache keyed on the request body.
@@ -38,6 +42,5 @@ Released.
 ## Later
 
 - State at any historical ledger, not only from the snapshot onward.
-- Smaller cold history (a target of under 217 bytes per transaction across all of history).
 - Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
 - Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.
