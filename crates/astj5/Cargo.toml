@@ -12,3 +12,6 @@ witness-core = { path = "../witness-core" }
 zstd = "0.14.3"
 k256 = { version = "0.14", features = ["ecdsa"] }
 sha2 = "0.10"
+
+[lints]
+workspace = true

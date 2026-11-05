@@ -1,7 +1,6 @@
 //! ASTJ, the codec of Astraea's cold history: an exact structural transposition
 //! of each ledger with a shared value journal. Transactions, metadata, patches,
 //! record order and framing come back unchanged.
-#![forbid(unsafe_code)]
 pub mod fast;
 mod joint;
 /// Pool of prepared blocks.
@@ -26,7 +25,9 @@ pub(crate) fn seal_digest(hash: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
     h.update(b"XWCS");
     h.update(hash);
     h.update(bytes);
-    h.finalize()[..32].try_into().unwrap()
+    let mut out = [0; 32];
+    out.copy_from_slice(&h.finalize()[..32]);
+    out
 }
 fn er<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
@@ -93,8 +94,14 @@ impl<'a> Read<'a> {
         let n = self.count()?;
         self.take(n)
     }
+    fn array<const N: usize>(&mut self) -> Res<[u8; N]> {
+        self.take(N)?.try_into().map_err(er)
+    }
+    fn u64(&mut self) -> Res<u64> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
     fn u32(&mut self) -> Res<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_le_bytes(self.array()?))
     }
     fn oldblob(&mut self) -> Res<&'a [u8]> {
         let n = self.u32()? as usize;
@@ -133,7 +140,7 @@ pub fn load_rows(bytes: &[u8]) -> Res<Vec<Row>> {
         }
         let mut patches = vec![];
         for _ in 0..np {
-            let key = b.take(32)?.try_into().unwrap();
+            let key = b.array()?;
             patches.push((key, b.oldblob()?.to_vec()))
         }
         b.end()?;
@@ -506,7 +513,7 @@ fn part_streams(
         };
         if opt.joint && !opt.adaptive {
             out.push(2);
-            blob(out, joint_encoded.as_ref().unwrap());
+            blob(out, joint_encoded.as_ref().ok_or("joint column")?);
             continue;
         }
         let mut tokens = vec![];
@@ -536,11 +543,7 @@ fn part_streams(
             }
         }
         let candidate = if opt.numeric_delta && vs.iter().all(Option::is_some) {
-            delta(
-                &vs.iter()
-                    .map(|v| v.as_ref().unwrap().clone())
-                    .collect::<Vec<_>>(),
-            )
+            delta(&vs.iter().flatten().cloned().collect::<Vec<_>>())
         } else {
             None
         };
@@ -659,8 +662,8 @@ fn key_recipes(rows: &[Row]) -> HashMap<Vec<u8>, KeyRecipe> {
     for row in rows {
         for (k, v) in &row.patches {
             if let Ok(fs) = stobject::fields(v)
-                && let Some(ty) = field(&fs, 1, 1).filter(|x| x.len() == 2)
-                && let Some(recipe) = key_recipe(u16::from_be_bytes(ty.try_into().unwrap()), &fs, k)
+                && let Some(ty) = field(&fs, 1, 1).and_then(|x| <[u8; 2]>::try_from(x).ok())
+                && let Some(recipe) = key_recipe(u16::from_be_bytes(ty), &fs, k)
             {
                 out.entry(k.to_vec()).or_insert(recipe);
             }
@@ -685,10 +688,10 @@ fn key_recipes(rows: &[Row]) -> HashMap<Vec<u8>, KeyRecipe> {
                 let Some(key) = field(&inn, 5, 6).filter(|x| x.len() == 32) else {
                     continue;
                 };
-                let Some(ty) = field(&inn, 1, 1).filter(|x| x.len() == 2) else {
+                let Some(ty) = field(&inn, 1, 1).and_then(|x| <[u8; 2]>::try_from(x).ok()) else {
                     continue;
                 };
-                let ty = u16::from_be_bytes(ty.try_into().unwrap());
+                let ty = u16::from_be_bytes(ty);
                 for group in inn
                     .iter()
                     .filter(|f| f.id.type_code == 14 && [7, 8].contains(&f.id.field_code))
@@ -705,7 +708,7 @@ fn key_recipes(rows: &[Row]) -> HashMap<Vec<u8>, KeyRecipe> {
     }
     out
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub dictionaries: bool,
     pub derive_hashes: bool,
@@ -781,10 +784,13 @@ fn processing_order(row: &Row) -> Vec<usize> {
             .iter()
             .filter(|f| f.id.type_code == 2 && f.id.field_code == 28)
             .collect();
-        if indices.len() != 1 || indices[0].value.len() != 4 {
+        let [only] = indices.as_slice() else {
             return (0..row.txs.len()).collect();
-        }
-        indexed.push((u32::from_be_bytes(indices[0].value.try_into().unwrap()), i));
+        };
+        let Ok(index) = <[u8; 4]>::try_from(only.value) else {
+            return (0..row.txs.len()).collect();
+        };
+        indexed.push((u32::from_be_bytes(index), i));
     }
     indexed.sort_unstable();
     if indexed.windows(2).any(|w| w[0].0 == w[1].0) {
@@ -1047,7 +1053,7 @@ pub fn encode_block(rows: &[Row], opt: Options) -> Res<(Vec<u8>, Stats)> {
     }
     let columns_total: usize = parts.iter().map(|p| p.columns.len()).sum();
     if !chunked {
-        out.extend(part_bytes.pop().unwrap());
+        out.extend(part_bytes.pop().ok_or("block without parts")?);
     }
     let inner = out.len() + part_bytes.iter().map(Vec::len).sum::<usize>();
     if out.len() > MAX || part_bytes.iter().any(|p| p.len() > MAX) {
@@ -1241,9 +1247,9 @@ pub fn unpack(archive: &[u8]) -> Res<Vec<Row>> {
     for _ in 0..count {
         let first = r.u32()?;
         let n = r.u32()? as usize;
-        let off = u64::from_le_bytes(r.take(8)?.try_into().unwrap()) as usize;
-        let len = u64::from_le_bytes(r.take(8)?.try_into().unwrap()) as usize;
-        let hash: [u8; 32] = r.take(32)?.try_into().unwrap();
+        let off = r.u64()? as usize;
+        let len = r.u64()? as usize;
+        let hash: [u8; 32] = r.array()?;
         if off != expected {
             return Err("noncanonical directory offset".into());
         }
@@ -1261,7 +1267,7 @@ pub fn unpack(archive: &[u8]) -> Res<Vec<Row>> {
             1 => decode_block(&payload[1..])?,
             2 => fast::Prepared::parse_parts(&payload[1..])?.all_rows()?,
             0 => {
-                let rawlen = u64::from_le_bytes(p.take(8)?.try_into().unwrap());
+                let rawlen = p.u64()?;
                 if rawlen > MAX as u64 {
                     return Err("raw block limit".into());
                 }
@@ -1285,7 +1291,7 @@ pub fn unpack(archive: &[u8]) -> Res<Vec<Row>> {
     Ok(rows)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Entry {
     first: u32,
     count: usize,
@@ -1294,6 +1300,7 @@ struct Entry {
     hash: [u8; 32],
 }
 /// Reads only the front directory and the selected independent block from a file.
+#[derive(Debug)]
 pub struct ArchiveFile {
     file: std::fs::File,
     entries: Vec<Entry>,
@@ -1313,7 +1320,7 @@ impl ArchiveFile {
         {
             return Err("archive magic".into());
         }
-        let count = u32::from_le_bytes(head[8..].try_into().unwrap()) as usize;
+        let count = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as usize;
         if count == 0 || count > 1_000_000 {
             return Err("directory count".into());
         }
@@ -1329,9 +1336,9 @@ impl ArchiveFile {
             let mut r = Read::new(&buf);
             let first = r.u32()?;
             let count = r.u32()? as usize;
-            let offset = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
-            let length = u64::from_le_bytes(r.take(8)?.try_into().unwrap());
-            let hash = r.take(32)?.try_into().unwrap();
+            let offset = r.u64()?;
+            let length = r.u64()?;
+            let hash = r.array()?;
             if count == 0
                 || length > MAX as u64 + 1_048_576
                 || offset != expected
@@ -1375,7 +1382,7 @@ impl ArchiveFile {
             1 => decode_block(&payload[1..])?,
             2 => fast::Prepared::parse_parts(&payload[1..])?.all_rows()?,
             0 => {
-                let n = u64::from_le_bytes(p.take(8)?.try_into().unwrap());
+                let n = p.u64()?;
                 if n > MAX as u64 {
                     return Err("raw block limit".into());
                 }

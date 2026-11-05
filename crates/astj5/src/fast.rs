@@ -153,7 +153,7 @@ pub(crate) struct FrameParts {
 /// shared section and the parts.
 pub(crate) fn frame_parts(frame: &[u8]) -> Res<FrameParts> {
     fn size(fr: &mut Read<'_>) -> Res<usize> {
-        let n = u64::from_le_bytes(fr.take(8)?.try_into().unwrap());
+        let n = fr.u64()?;
         if n > MAX as u64 {
             return Err("part limit".into());
         }
@@ -389,7 +389,7 @@ fn read_dictionary(
 }
 fn decompress_frame(frame: &[u8]) -> Res<Vec<u8>> {
     let mut fr = Read::new(frame);
-    let size = u64::from_le_bytes(fr.take(8)?.try_into().unwrap());
+    let size = fr.u64()?;
     if size > MAX as u64 {
         return Err("block limit".into());
     }
@@ -398,6 +398,13 @@ fn decompress_frame(frame: &[u8]) -> Res<Vec<u8>> {
         return Err("journal size".into());
     }
     Ok(raw)
+}
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared")
+            .field("ledgers", &self.layout.len())
+            .finish_non_exhaustive()
+    }
 }
 impl Prepared {
     pub fn parse(frame: &[u8]) -> Res<Self> {
@@ -578,14 +585,16 @@ impl Prepared {
                 .iter()
                 .map(|t| {
                     t.iter()
-                        .map(|op| match op {
-                            Op::Value(a) => PlanOp::Fixed(bytes(&pool, *a).unwrap().to_vec()),
-                            Op::Column(_) | Op::Cached(_) => PlanOp::Value,
-                            Op::Child => PlanOp::Child,
+                        .map(|op| {
+                            Ok(match op {
+                                Op::Value(a) => PlanOp::Fixed(bytes(&pool, *a)?.to_vec()),
+                                Op::Column(_) | Op::Cached(_) => PlanOp::Value,
+                                Op::Child => PlanOp::Child,
+                            })
                         })
-                        .collect()
+                        .collect::<Res<Vec<_>>>()
                 })
-                .collect()
+                .collect::<Res<Vec<_>>>()?
         } else {
             vec![]
         };
