@@ -54,11 +54,6 @@ pub struct PublishedList {
 }
 
 impl PublishedList {
-    /// Whether the list is in effect at time `t` (seconds since the XRPL epoch).
-    pub fn valid_at(&self, t: u32) -> bool {
-        self.valid_between(t, t)
-    }
-
     /// Whether the list is in effect at any moment of the window `[from, to]`.
     pub fn valid_between(&self, from: u32, to: u32) -> bool {
         self.effective.is_none_or(|e| e <= to) && self.expiration.is_none_or(|x| from < x)

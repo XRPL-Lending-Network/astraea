@@ -21,36 +21,8 @@ name = "astraea-state"
 path = "src/bin/state.rs"
 
 [[bin]]
-name = "astraea-layoutbench"
-path = "src/bin/layoutbench.rs"
-
-[[bin]]
-name = "astraea-deltabench"
-path = "src/bin/deltabench.rs"
-
-[[bin]]
 name = "astraea-xrpla"
 path = "src/bin/xrpla.rs"
-
-[[bin]]
-name = "astraea-indexbench"
-path = "src/bin/indexbench.rs"
-
-[[bin]]
-name = "astraea-coldbench"
-path = "src/bin/coldbench.rs"
-
-[[bin]]
-name = "astraea-partbench"
-path = "src/bin/partbench.rs"
-
-[[bin]]
-name = "astraea-codecbench"
-path = "src/bin/codecbench.rs"
-
-[[bin]]
-name = "astraea-blockbench"
-path = "src/bin/blockbench.rs"
 
 [dependencies]
 witness-core.workspace = true

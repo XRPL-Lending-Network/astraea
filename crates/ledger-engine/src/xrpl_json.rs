@@ -117,19 +117,6 @@ impl Definitions {
         self.ledger_entry_types.get(&code).map(String::as_str)
     }
 
-    pub fn ledger_entry_code(&self, name: &str) -> Option<u16> {
-        self.ledger_entry_types
-            .iter()
-            .find(|(_, n)| n.eq_ignore_ascii_case(name))
-            .map(|(c, _)| *c)
-    }
-
-    pub fn field_name(&self, type_code: u16, field_code: u16) -> Option<&str> {
-        self.fields
-            .get(&(type_code, field_code))
-            .map(String::as_str)
-    }
-
     pub fn result(&self, code: i32) -> Option<&str> {
         self.results.get(&code).map(String::as_str)
     }

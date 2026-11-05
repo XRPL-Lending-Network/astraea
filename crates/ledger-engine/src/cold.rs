@@ -903,16 +903,6 @@ impl Cold {
         })
     }
 
-    /// Block cache budget per open segment, in bytes; takes effect from the
-    /// next time a segment is opened.
-    pub fn with_budget(self, bytes: usize) -> Cold {
-        for s in &self.segments {
-            s.budget.store(bytes, std::sync::atomic::Ordering::Relaxed);
-            s.close();
-        }
-        self
-    }
-
     pub fn segments(&self) -> &[Arc<ColdSegment>] {
         &self.segments
     }
@@ -1164,10 +1154,7 @@ pub(crate) mod tests {
         let [_, asix, _, man] = names(dir.path(), 100);
         assert!(!asix.exists());
         // A segment from before 0.3: its manifest lists ASIX2 indexes.
-        let rows = ls.iter().map(row_of).collect::<Res<Vec<_>>>().unwrap();
-        let index = astraea_journal_codec::indexed::Indexes::build(&rows)
-            .unwrap()
-            .encode();
+        let index = b"ASIX2 indexes from before 0.3".to_vec();
         fs::write(&asix, &index).unwrap();
         let mut old = m.clone();
         old["files"]["asix"] =

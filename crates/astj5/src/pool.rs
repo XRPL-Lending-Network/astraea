@@ -1,13 +1,11 @@
-//! Serving pool of prepared blocks for Ledger Engine integration. Added when
-//! ASTJ5 was connected to Astraea; not part of the frozen research package,
-//! and it does not change the format or the other modules.
+//! Serving pool of prepared blocks for the Ledger Engine.
 //!
-//! `dense::Reader` keeps one prepared block behind `&mut self`: concurrent
-//! readers of different blocks serialize and every switch re-prepares. The
+//! A reader with one prepared block behind `&mut self` would serialize concurrent
+//! readers of different blocks and re-prepare on every switch. The
 //! pool keeps several prepared blocks under a byte budget, prepares different
 //! blocks in parallel (at most `max_prepares` at a time), and concurrent
 //! requests for the same block wait for one preparation. Verification before
-//! a block is cached is the same as in `dense::Reader`: exact framing hashed
+//! a block is cached: exact framing hashed
 //! one ledger at a time against the directory SHA512Half, ledger sequence,
 //! transaction roots and the internal parent chain.
 //!
@@ -51,7 +49,6 @@ pub struct Pool {
     slots: Mutex<(Vec<Slot>, u64)>,
     preparing: (Mutex<usize>, Condvar),
     max_prepares: usize,
-    loads: std::sync::atomic::AtomicUsize,
     seal: Vec<Vec<[u8; 32]>>,
 }
 /// Seal digests of a block's stored bytes: the whole payload, or for JC06 the
@@ -110,7 +107,6 @@ impl Pool {
             slots: Mutex::new((vec![], 0)),
             preparing: (Mutex::new(0), Condvar::new()),
             max_prepares: max_prepares.max(1),
-            loads: std::sync::atomic::AtomicUsize::new(0),
             seal: Vec::new(),
         })
     }
@@ -163,9 +159,6 @@ impl Pool {
     }
     pub fn first(&self) -> Option<u32> {
         self.entries.first().map(|e| e.first)
-    }
-    pub fn block_loads(&self) -> usize {
-        self.loads.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn cached_bytes(&self) -> usize {
         self.slots
@@ -230,8 +223,6 @@ impl Pool {
         if let (Some(digests), Data::Prepared(f)) = (parts, &mut data) {
             f.check_parts(*hash, digests)?;
         }
-        self.loads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(data)
     }
     fn payload(&self, i: usize) -> Res<Vec<u8>> {

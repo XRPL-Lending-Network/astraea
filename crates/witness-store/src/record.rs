@@ -28,11 +28,6 @@ pub struct Record {
 }
 
 impl Record {
-    /// Size of the record on disk, including the length prefix.
-    pub fn encoded_len(&self) -> usize {
-        4 + FIXED_LEN + self.data.len()
-    }
-
     pub fn encode_into(&self, out: &mut Vec<u8>) {
         let body_len = u32::try_from(FIXED_LEN + self.data.len()).unwrap_or(u32::MAX);
         out.extend_from_slice(&body_len.to_le_bytes());

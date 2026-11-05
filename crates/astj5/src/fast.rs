@@ -1060,9 +1060,6 @@ impl Prepared {
     pub fn all_rows(&mut self) -> Res<Vec<Row>> {
         (0..self.layout.len()).map(|i| self.row(i)).collect()
     }
-    pub fn tx_count(&self) -> usize {
-        self.tx_hashes.len()
-    }
     pub fn memory_bytes(&self) -> usize {
         self.tree.capacity() * 8
             + self.tree_docs.capacity() * 16

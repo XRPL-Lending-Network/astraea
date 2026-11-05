@@ -61,7 +61,6 @@ pub mod state;
 pub mod statetree;
 pub mod subs;
 pub mod ter;
-pub mod txcodec;
 pub mod txindex;
 pub mod xrpl_json;
 pub mod xrpla;

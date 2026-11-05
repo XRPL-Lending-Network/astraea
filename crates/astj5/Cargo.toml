@@ -1,17 +1,5 @@
-# ASTJ5 / JC05, canonical profile: cold history storage for Astraea (design
-# brief of 2026-10-27). The src/ files are byte-for-byte copies from the
-# research package astraea-journal-sequential-2026-10-27/codec/src (package
-# SHA256SUMS 283862fa4538e758678fde514cb09d85c2c4a3dee520012fab1632cdc292cbf8);
-# only the path to witness-core was changed (it matches pinned snapshot
-# 7838927). Added during integration: src/pool.rs (a pool of prepared blocks
-# for serving), the `pub mod pool;` line in lib.rs, read methods in src/fast.rs
-# that decode part of a row, a faster hasher for the field cache, and the
-# JC06 / ASTJ6 format: blocks cut into parts that decode on their own
-# (`Options::part_raw`, payload mode 2, `Prepared::open_parts`), with seal
-# digests per part. JC02-JC05 blocks are written and read as before; the other
-# modules are unchanged.
-# This is a research format: the production version and its compatibility
-# rules will be fixed separately.
+# ASTJ: the codec of Astraea's cold history. See docs/architecture.md for what
+# the format does and docs/running.md for rewriting older segments.
 [package]
 name = "astraea-journal-codec"
 version = "0.1.0"
@@ -21,8 +9,6 @@ license = "ISC"
 publish = false
 [dependencies]
 witness-core = { path = "../witness-core" }
-hex = "0.4"
-serde_json = "1"
 zstd = "0.14.3"
 k256 = { version = "0.14", features = ["ecdsa"] }
 sha2 = "0.10"

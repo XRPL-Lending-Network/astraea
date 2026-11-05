@@ -6,9 +6,9 @@
 //! manifest says; that the network confirmed the ledger is a quorum under a
 //! trust policy. These are different claims and must not be mixed here.
 
+use crate::HashPrefix;
 use crate::keys::{VerifyError, verify};
 use crate::stobject::{self, Error, fields as f};
-use crate::{HashPrefix, sha512_half};
 
 /// Full validation: the validator considers this ledger accepted.
 pub const FLAG_FULL: u32 = 0x0000_0001;
@@ -97,12 +97,6 @@ impl Validation {
             &self.signature,
             self.flags & FLAG_FULLY_CANONICAL != 0,
         )
-    }
-
-    /// The hash of the signed data is a stable identifier of the statement: two
-    /// validations with the same hash say the same thing, even if the signatures differ.
-    pub fn signing_hash(&self) -> [u8; 32] {
-        sha512_half(&self.signing_data)
     }
 }
 
