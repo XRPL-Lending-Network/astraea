@@ -100,22 +100,6 @@ pub fn parse_records(raw: &[u8]) -> Result<Records<'_>, String> {
     Ok((out, at))
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent()
-        && let Ok(d) = File::open(parent)
-    {
-        d.sync_all().ok();
-    }
-    Ok(())
-}
-
 /// Last ledger in the sealed segments, from the file names.
 fn sealed_last(segments: &Path) -> std::io::Result<Option<u32>> {
     let mut best = None;
@@ -221,7 +205,7 @@ impl LedgerLog {
             .dir
             .join("segments")
             .join(format!("led-{first:010}-{last:010}.xwle.zst"));
-        write_atomic(&path, &zst).map_err(io)?;
+        witness_core::util::write_atomic(&path, &zst).map_err(io)?;
         // The compressed segment is on disk, so the log is no longer needed.
         fs::remove_file(&journal).map_err(io)?;
         self.file = OpenOptions::new()

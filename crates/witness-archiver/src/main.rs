@@ -40,7 +40,8 @@ use serde_json::{Value, json};
 use tokio::time::{Instant, interval, sleep};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
-use witness_store::segment::{latest_seal, now_ms};
+use witness_core::util::now_ms;
+use witness_store::segment::latest_seal;
 use witness_store::{Record, SegmentConfig, SegmentWriter};
 
 use crate::manifests::{Book, Outcome};

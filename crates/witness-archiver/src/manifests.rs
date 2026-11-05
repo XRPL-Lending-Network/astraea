@@ -134,7 +134,7 @@ impl Book {
             .to_owned();
         let seq = details.get("seq").and_then(Value::as_u64).unwrap_or(0);
         let path = self.dir.join(format!("{master_key}-{seq:010}-{short}.bin"));
-        write_atomic(&path, &raw)?;
+        witness_core::util::write_atomic(&path, &raw)?;
         let mut f = OpenOptions::new()
             .create(true)
             .append(true)
@@ -147,16 +147,6 @@ impl Book {
         self.stored_total += 1;
         Ok(Outcome::Stored { master_key, seq })
     }
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

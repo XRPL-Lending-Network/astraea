@@ -37,27 +37,6 @@ const SKIP_EVERY: u64 = 128;
 /// Target average bucket size used to pick the number of bucket bits.
 const BUCKET_TARGET: u64 = 64;
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-fn get_varint(b: &[u8], at: &mut usize) -> Res<u64> {
-    let mut v = 0u64;
-    for shift in (0..64).step_by(7) {
-        let x = *b.get(*at).ok_or("varint truncated")?;
-        *at += 1;
-        v |= u64::from(x & 0x7F) << shift;
-        if x & 0x80 == 0 {
-            return Ok(v);
-        }
-    }
-    Err("varint too long".into())
-}
-
 fn u32_at(b: &[u8], at: usize) -> Res<u32> {
     let x = b.get(at..at + 4).ok_or("index truncated")?;
     Ok(u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
@@ -244,17 +223,17 @@ pub fn build_account_index(first: u32, postings: &BTreeMap<AccountId, Vec<Postin
         let (mut pl, mut pi) = (first, 0u32);
         for (k, &(l, i)) in ps.iter().enumerate() {
             let dl = l - if k == 0 { first } else { pl };
-            put_varint(&mut lists, u64::from(dl));
+            crate::varint::put(&mut lists, u64::from(dl));
             // Within the same ledger store the TransactionIndex difference, otherwise the value itself.
-            put_varint(
+            crate::varint::put(
                 &mut lists,
                 u64::from(if dl == 0 && k > 0 { i - pi } else { i }),
             );
             (pl, pi) = (l, i);
         }
         dir.extend_from_slice(acc);
-        put_varint(&mut dir, off);
-        put_varint(&mut dir, ps.len() as u64);
+        crate::varint::put(&mut dir, off);
+        crate::varint::put(&mut dir, ps.len() as u64);
     }
     let mut out = ACC_MAGIC.to_vec();
     out.extend(first.to_le_bytes());
@@ -278,7 +257,7 @@ pub fn build_account_index_v2(
     for &c in counts {
         starts.push(acc);
         acc += u64::from(c);
-        put_varint(&mut cs, u64::from(c));
+        crate::varint::put(&mut cs, u64::from(c));
     }
     let key = |&(l, i): &Posting| -> Res<u64> {
         let d = l.checked_sub(first).ok_or("ledger before the partition")? as usize;
@@ -303,8 +282,8 @@ pub fn build_account_index_v2(
         let (mut prev, mut block_at, mut block_base) = (0u64, off, 0u64);
         for (j, p) in ps.iter().enumerate() {
             if j > 0 && (j as u64).is_multiple_of(SKIP_EVERY) {
-                put_varint(&mut skips, lists.len - block_at);
-                put_varint(&mut skips, prev - block_base);
+                crate::varint::put(&mut skips, lists.len - block_at);
+                crate::varint::put(&mut skips, prev - block_base);
                 (block_at, block_base) = (lists.len, prev);
             }
             let v = key(p)?;
@@ -312,11 +291,11 @@ pub fn build_account_index_v2(
             prev = v;
         }
         dir.extend_from_slice(a);
-        put_varint(&mut dir, off);
-        put_varint(&mut dir, ps.len() as u64);
+        crate::varint::put(&mut dir, off);
+        crate::varint::put(&mut dir, ps.len() as u64);
         dir.push(k as u8);
         if ps.len() as u64 > SKIP_EVERY {
-            put_varint(&mut dir, skip_off);
+            crate::varint::put(&mut dir, skip_off);
         }
     }
     let mut out = ACC2_MAGIC.to_vec();
@@ -446,7 +425,7 @@ impl<'a> AccountIndex<'a> {
             let (mut at, mut acc) = (0, 0u64);
             starts.push(0);
             for _ in 0..ledgers {
-                acc += get_varint(cs, &mut at)?;
+                acc += crate::varint::get(cs, &mut at).map_err(String::from)?;
                 starts.push(acc);
             }
             (starts, 30 + cl, sl)
@@ -463,14 +442,14 @@ impl<'a> AccountIndex<'a> {
                 .try_into()
                 .map_err(|_| "account")?;
             at += 20;
-            let off = get_varint(d, &mut at)?;
-            let cnt = get_varint(d, &mut at)?;
+            let off = crate::varint::get(d, &mut at).map_err(String::from)?;
+            let cnt = crate::varint::get(d, &mut at).map_err(String::from)?;
             let (mut k, mut skip) = (0, 0);
             if v2 {
                 k = u32::from((*d.get(at).ok_or("directory truncated")?).min(63));
                 at += 1;
                 if cnt > SKIP_EVERY {
-                    skip = get_varint(d, &mut at)?;
+                    skip = crate::varint::get(d, &mut at).map_err(String::from)?;
                 }
             }
             dir.push((acc, off, cnt, k, skip));
@@ -503,8 +482,8 @@ impl<'a> AccountIndex<'a> {
         let mut at = usize::try_from(off).map_err(|e| e.to_string())?;
         let (mut pl, mut pi) = (self.first, 0u32);
         for j in 0..cnt {
-            let dl = get_varint(self.lists, &mut at)? as u32;
-            let v = get_varint(self.lists, &mut at)? as u32;
+            let dl = crate::varint::get(self.lists, &mut at).map_err(String::from)? as u32;
+            let v = crate::varint::get(self.lists, &mut at).map_err(String::from)? as u32;
             let l = if j == 0 { self.first + dl } else { pl + dl };
             let i = if dl == 0 && j > 0 { pi + v } else { v };
             out.push((l, i));
@@ -590,10 +569,10 @@ impl<'a> AccountIndex<'a> {
         let (mut bit, mut base) = (off, 0u64);
         for _ in 1..n {
             bit = bit
-                .checked_add(get_varint(self.skips, &mut at)?)
+                .checked_add(crate::varint::get(self.skips, &mut at).map_err(String::from)?)
                 .ok_or("entry point outside the list")?;
             base = base
-                .checked_add(get_varint(self.skips, &mut at)?)
+                .checked_add(crate::varint::get(self.skips, &mut at).map_err(String::from)?)
                 .ok_or("entry point outside the partition")?;
             out.push((bit, base));
         }
@@ -832,7 +811,7 @@ impl AccountFile {
             if d.is_multiple_of(MARK) {
                 marks.push((acc, at as u32));
             }
-            acc += get_varint(&cs, &mut at)?;
+            acc += crate::varint::get(&cs, &mut at).map_err(String::from)?;
         }
         if ledgers.is_multiple_of(MARK) {
             marks.push((acc, at as u32));
@@ -850,11 +829,11 @@ impl AccountFile {
                 .try_into()
                 .map_err(|_| "account")?;
             at += 20;
-            get_varint(&dir, &mut at)?;
-            let cnt = get_varint(&dir, &mut at)?;
+            crate::varint::get(&dir, &mut at).map_err(String::from)?;
+            let cnt = crate::varint::get(&dir, &mut at).map_err(String::from)?;
             at += 1;
             if cnt > SKIP_EVERY {
-                get_varint(&dir, &mut at)?;
+                crate::varint::get(&dir, &mut at).map_err(String::from)?;
             }
             if k % SPARSE == 0 {
                 sparse.push((a, start as u64));
@@ -901,12 +880,12 @@ impl AccountFile {
                 .try_into()
                 .map_err(|_| "account")?;
             at += 20;
-            let off = get_varint(&d, &mut at)?;
-            let cnt = get_varint(&d, &mut at)?;
+            let off = crate::varint::get(&d, &mut at).map_err(String::from)?;
+            let cnt = crate::varint::get(&d, &mut at).map_err(String::from)?;
             let k = u32::from((*d.get(at).ok_or("directory truncated")?).min(63));
             at += 1;
             let skip = if cnt > SKIP_EVERY {
-                get_varint(&d, &mut at)?
+                crate::varint::get(&d, &mut at).map_err(String::from)?
             } else {
                 0
             };
@@ -930,7 +909,7 @@ impl AccountFile {
         out.push(v);
         let mut at = 0;
         for _ in 0..n {
-            v += get_varint(&b, &mut at)?;
+            v += crate::varint::get(&b, &mut at).map_err(String::from)?;
             out.push(v);
         }
         Ok(out)
@@ -996,10 +975,10 @@ impl AccountFile {
             let (mut at, mut bit, mut base) = (0, off, 0u64);
             for _ in 1..nblocks {
                 bit = bit
-                    .checked_add(get_varint(&sk, &mut at)?)
+                    .checked_add(crate::varint::get(&sk, &mut at).map_err(String::from)?)
                     .ok_or("entry point outside the list")?;
                 base = base
-                    .checked_add(get_varint(&sk, &mut at)?)
+                    .checked_add(crate::varint::get(&sk, &mut at).map_err(String::from)?)
                     .ok_or("entry point outside the partition")?;
                 blocks.push((bit, base));
             }

@@ -23,9 +23,7 @@
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use witness_core::sha512_half;
@@ -147,13 +145,6 @@ pub struct SegmentWriter {
     parked: Vec<Lineage>,
     /// How many bytes of torn tail were cut off at startup.
     pub torn_bytes_at_start: u64,
-}
-
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 impl SegmentWriter {
@@ -297,14 +288,17 @@ impl SegmentWriter {
     }
 
     fn open_segment(&mut self, reference: u32) -> Result<()> {
-        let now = now_ms();
+        let now = witness_core::util::now_ms();
         self.choose_lineage(reference, now);
         let m = OpenMeta {
             nominal_first: self.nominal_start(reference),
             opened_ms: now,
             coverage_from: self.lineage.is_none().then_some(reference),
         };
-        write_atomic(&self.cfg.dir.join("current.json"), &serde_json::to_vec(&m)?)?;
+        witness_core::util::write_atomic(
+            &self.cfg.dir.join("current.json"),
+            &serde_json::to_vec(&m)?,
+        )?;
         self.open = Some(m);
         Ok(())
     }
@@ -409,7 +403,7 @@ impl SegmentWriter {
         let raw = fs::read(self.journal.path())?;
         let zst = zstd::bulk::compress(&raw, self.cfg.zstd_level)?;
         let seg_path = segment_path(&self.cfg.dir, m.nominal_first, m.opened_ms);
-        write_atomic(&seg_path, &zst)?;
+        witness_core::util::write_atomic(&seg_path, &zst)?;
 
         let nominal_last = m.nominal_first.saturating_add(self.cfg.segment_ledgers - 1);
         let in_window = !self.seen.is_empty();
@@ -451,14 +445,14 @@ impl SegmentWriter {
             coverage_last,
             missing_ledgers: missing_ranges(coverage_first, coverage_last, &self.seen),
             opened_ms: m.opened_ms,
-            sealed_ms: now_ms(),
+            sealed_ms: witness_core::util::now_ms(),
             raw_bytes: raw.len() as u64,
             raw_hash: hex::encode_upper(sha512_half(&raw)),
             prev_seal_hash: self.prev_hash.clone(),
             seal_hash: String::new(),
         }
         .finalize();
-        write_atomic(
+        witness_core::util::write_atomic(
             &seal_path(&self.cfg.dir, m.nominal_first, m.opened_ms),
             &serde_json::to_vec_pretty(&seal)?,
         )?;
@@ -497,24 +491,6 @@ fn segment_path(dir: &Path, nominal_first: u32, opened_ms: u64) -> PathBuf {
 fn seal_path(dir: &Path, nominal_first: u32, opened_ms: u64) -> PathBuf {
     dir.join("segments")
         .join(format!("seg-{nominal_first:010}-{opened_ms}.seal.json"))
-}
-
-/// Writes the whole file or nothing at all: temporary file, flush to disk,
-/// rename.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent()
-        && let Ok(d) = fs::File::open(parent)
-    {
-        d.sync_all().ok();
-    }
-    Ok(())
 }
 
 /// The most recently sealed seal in the segments directory.

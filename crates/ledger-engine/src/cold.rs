@@ -170,34 +170,13 @@ pub fn row_of(l: &Ledger) -> Res<Row> {
     })
 }
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-fn get_varint(b: &[u8], at: &mut usize) -> Res<u64> {
-    let mut v = 0u64;
-    for shift in (0..64).step_by(7) {
-        let x = *b.get(*at).ok_or_else(|| corrupt("varint truncated"))?;
-        *at += 1;
-        v |= u64::from(x & 0x7F) << shift;
-        if x & 0x80 == 0 {
-            return Ok(v);
-        }
-    }
-    Err(corrupt("varint too long"))
-}
-
 /// Kinds stream: `XWCK\0\1`, mode (1 is explicit, 0 means the source does not
 /// distinguish), u32 ledger count, then zstd of (each ledger's change count as a
 /// varint, then one kind byte per change, explicit mode only).
 fn kinds_bytes(ledgers: &[Ledger], mode: Kinds) -> Res<Vec<u8>> {
     let mut body = Vec::new();
     for l in ledgers {
-        put_varint(&mut body, l.changes.len() as u64);
+        crate::varint::put(&mut body, l.changes.len() as u64);
     }
     for l in ledgers {
         for c in &l.changes {
@@ -254,7 +233,7 @@ fn parse_kinds(b: &[u8], ledgers: usize) -> Res<KindsIndex> {
     starts.push(0);
     for _ in 0..ledgers {
         total = total
-            .checked_add(get_varint(&body, &mut at)?)
+            .checked_add(crate::varint::get(&body, &mut at).map_err(corrupt)?)
             .filter(|t| *t <= MAX_CHANGES)
             .ok_or_else(|| corrupt("kinds stream: too many changes"))?;
         starts.push(total);

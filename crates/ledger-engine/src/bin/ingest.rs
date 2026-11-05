@@ -138,13 +138,6 @@ struct Args {
     publishers: Vec<String>,
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// Writes a ledger and records it in the metrics.
 fn commit(sink: &mut Sink, ledger: &Ledger, metrics: &Shared) -> Result<(), String> {
     let t = Instant::now();
@@ -157,7 +150,7 @@ fn commit(sink: &mut Sink, ledger: &Ledger, metrics: &Shared) -> Result<(), Stri
     m.changes += ledger.changes.len() as u64;
     m.last_ledger = sink.last;
     m.last_close_time = close_time;
-    m.last_commit_ms = now_ms();
+    m.last_commit_ms = witness_core::util::now_ms();
     m.pending_ledgers = sink.writer.buffered() as u64;
     Ok(())
 }

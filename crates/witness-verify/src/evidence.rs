@@ -18,8 +18,9 @@ use witness_core::evidence::{
 use witness_core::quorum::{Key, PublishedList, policies_between};
 use witness_core::shamap::{prove, tx_id, tx_leaf_hash};
 use witness_core::txproof::TxProof;
+use witness_core::util::now_ms;
 use witness_core::{Manifest, Validation};
-use witness_store::segment::{now_ms, read_segment};
+use witness_store::segment::read_segment;
 
 use crate::archive::seals;
 use crate::quorum::{DEFAULT_PUBLISHERS, load_lists};

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::Engine;
 use clap::Parser;
@@ -148,30 +148,6 @@ fn summarize(body: &[u8]) -> Result<Summary, String> {
     })
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Writes the whole file or nothing at all.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent()
-        && let Ok(d) = fs::File::open(parent)
-    {
-        d.sync_all().ok();
-    }
-    Ok(())
-}
-
 fn append_line(path: &Path, v: &Value) -> std::io::Result<()> {
     let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     f.write_all(format!("{v}\n").as_bytes())?;
@@ -251,7 +227,7 @@ fn fetch(agent: &ureq::Agent, url: &str) -> Result<Fetched, String> {
 }
 
 fn poll(agent: &ureq::Agent, site: &Site, dir: &Path, seen: &mut Seen) -> std::io::Result<()> {
-    let at_ms = now_ms();
+    let at_ms = witness_core::util::now_ms();
     let mut obs = json!({"at_ms": at_ms, "site": site.name, "url": site.url});
     match fetch(agent, &site.url) {
         Err(e) => {
@@ -289,7 +265,7 @@ fn poll(agent: &ureq::Agent, site: &Site, dir: &Path, seen: &mut Seen) -> std::i
                     fs::create_dir_all(&site_dir)?;
                     let path = site_dir.join(format!("{max:010}-{}.json", &hash[..16]));
                     if !path.exists() {
-                        write_atomic(&path, &f.body)?;
+                        witness_core::util::write_atomic(&path, &f.body)?;
                         info!(
                             "{}: new version, list {max}, stored {}",
                             site.name,

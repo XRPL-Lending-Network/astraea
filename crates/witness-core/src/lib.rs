@@ -38,6 +38,7 @@ pub mod stobject;
 pub mod txproof;
 pub mod unl;
 pub mod unlstore;
+pub mod util;
 pub mod validation;
 
 pub use hash::{HashPrefix, sha512_half, sha512_half_prefixed};

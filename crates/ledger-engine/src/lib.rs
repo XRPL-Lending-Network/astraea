@@ -62,6 +62,7 @@ pub mod statetree;
 pub mod subs;
 pub mod ter;
 pub mod txindex;
+mod varint;
 pub mod xrpl_json;
 pub mod xrpla;
 
