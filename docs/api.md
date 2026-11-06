@@ -66,7 +66,7 @@ Where the answers differ from Clio's:
 | `confirmation_rule` | the quorum rule in force |
 | `state_root_checked` | whether the state root is checked on every ledger |
 
-`load_factor` and `rippled_version` are taken from a node when forwarding is configured.
+`load_factor` and `rippled_version` are taken from a node when forwarding is configured. `server_info` never waits for a node: it uses the node's last answer, refreshed in the background. If no node has answered for 10 seconds, or none has yet since the start, `rippled_version` is left out and `load_factor` is 1, so a `load_factor` of 1 does not by itself mean the network's fees are at their base level.
 
 ### Forwarded to a node
 

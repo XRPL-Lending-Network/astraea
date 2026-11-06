@@ -608,6 +608,10 @@ async fn run(args: Args) -> Result<(), String> {
                 Duration::from_secs(args.forward_timeout),
             ))
         });
+        // So that the first client's server_info already has the node's fields.
+        if let Some(f) = &forwarder {
+            f.node_server_info();
+        }
         let engine = Arc::new(engine);
         // What history and state the server holds, and how much disk each part takes.
         let (cov, m2) = (engine.clone(), metrics.clone());

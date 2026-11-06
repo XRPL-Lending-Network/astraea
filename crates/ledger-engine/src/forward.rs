@@ -140,36 +140,33 @@ impl Forwarder {
         }
     }
 
-    /// The node's server_info, for the fields merged into ours. Returns the
-    /// last answer at once and, once it is older than `CACHE_FOR`, refreshes
-    /// it in the background, so a client's server_info doesn't wait for the
-    /// node. Only the first call, or one after the node has been silent for
-    /// `INFO_KEEP`, waits.
+    /// The node's server_info, for the fields merged into ours. Never waits for
+    /// a node: a client's server_info is answered from our own data, and with
+    /// every node silent, waiting would outlast a client's timeout. Returns the
+    /// last answer if it is younger than `INFO_KEEP`, and once it is older than
+    /// `CACHE_FOR`, or there is none, refreshes it in the background.
     pub fn node_server_info(self: &Arc<Self>) -> Option<Map<String, Value>> {
-        let last = self
-            .info
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .filter(|(at, _)| at.elapsed() < INFO_KEEP)
-            .map(|(at, m)| (at.elapsed() >= CACHE_FOR, m.clone()));
-        let Some((stale, info)) = last else {
-            return self.refresh_info();
+        let (fresh, info) = match &*self.info.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some((at, m)) => (
+                at.elapsed() < CACHE_FOR,
+                (at.elapsed() < INFO_KEEP).then(|| m.clone()),
+            ),
+            None => (false, None),
         };
-        if stale && !self.info_refreshing.swap(true, Ordering::AcqRel) {
+        if !fresh && !self.info_refreshing.swap(true, Ordering::AcqRel) {
             let f = self.clone();
             std::thread::spawn(move || {
                 f.refresh_info();
                 f.info_refreshing.store(false, Ordering::Release);
             });
         }
-        Some(info)
+        info
     }
 
-    fn refresh_info(&self) -> Option<Map<String, Value>> {
-        let r = self.forward("server_info", &Map::new()).ok()?;
-        *self.info.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), r.clone()));
-        Some(r)
+    fn refresh_info(&self) {
+        if let Ok(r) = self.forward("server_info", &Map::new()) {
+            *self.info.lock().unwrap_or_else(|p| p.into_inner()) = Some((Instant::now(), r));
+        }
     }
 
     /// `result` of the node's response. An error from the node itself (`status: error`)
@@ -320,10 +317,15 @@ mod tests {
             Duration::from_secs(5),
         ));
         let lf = |m: Map<String, Value>| m["info"]["load_factor"].as_u64().unwrap();
-        // The first call has nothing to give yet and waits for the node.
+        // The first call has nothing to give yet and doesn't wait for the node.
         let t = Instant::now();
-        assert_eq!(lf(f.node_server_info().unwrap()), 1);
-        assert!(t.elapsed() >= Duration::from_millis(150));
+        assert!(f.node_server_info().is_none());
+        assert!(t.elapsed() < Duration::from_millis(50));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while f.info.lock().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "no first answer");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         std::thread::sleep(CACHE_FOR);
         // Stale: the old answer comes at once, the new one arrives behind it.
         let t = Instant::now();
@@ -338,6 +340,28 @@ mod tests {
             assert!(Instant::now() < deadline, "no refresh");
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn server_info_does_not_wait_for_nodes_that_went_silent() {
+        // Two hung nodes, as when their network is gone: a request to them only
+        // ends at the timeout, 10 seconds in all. That is as long as clients wait.
+        let hung = || slow_node(Duration::from_secs(60));
+        let f = Arc::new(Forwarder::new(vec![hung(), hung()], Duration::from_secs(5)));
+        // The last answer is too old to pass on.
+        *f.info.lock().unwrap() = Some((
+            Instant::now() - INFO_KEEP,
+            json!({"info": {"load_factor": 7}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ));
+        let t = Instant::now();
+        for _ in 0..3 {
+            assert!(f.node_server_info().is_none());
+        }
+        assert!(t.elapsed() < Duration::from_millis(50));
+        assert!(f.info_refreshing.load(Ordering::Acquire));
     }
 
     #[test]
