@@ -1,8 +1,8 @@
 //! JC04: joint scalar selection and separated instruction/argument streams.
 use super::*;
 
-pub(crate) enum Scalar {
-    Literal(Vec<u8>),
+pub(crate) enum Scalar<'a> {
+    Literal(&'a [u8]),
     Dictionary(usize),
     Repeat,
     ContextDelta(u8, u64),
@@ -94,10 +94,22 @@ pub(crate) fn encode_recent(
     Ok(out)
 }
 #[cfg(test)]
-fn decode(data: &[u8], count: usize, dictionary_len: usize) -> Res<Vec<Scalar>> {
+enum Owned {
+    Literal(Vec<u8>),
+    Dictionary(usize),
+    Repeat,
+    ContextDelta(u8, u64),
+}
+#[cfg(test)]
+fn decode(data: &[u8], count: usize, dictionary_len: usize) -> Res<Vec<Owned>> {
     let mut out = vec![];
     decode_into(data, count, dictionary_len, |s| {
-        out.push(s);
+        out.push(match s {
+            Scalar::Literal(v) => Owned::Literal(v.to_vec()),
+            Scalar::Dictionary(id) => Owned::Dictionary(id),
+            Scalar::Repeat => Owned::Repeat,
+            Scalar::ContextDelta(w, z) => Owned::ContextDelta(w, z),
+        });
         Ok(())
     })?;
     Ok(out)
@@ -106,7 +118,7 @@ pub(crate) fn decode_into(
     data: &[u8],
     count: usize,
     dictionary_len: usize,
-    mut emit: impl FnMut(Scalar) -> Res<()>,
+    mut emit: impl FnMut(Scalar<'_>) -> Res<()>,
 ) -> Res<()> {
     let mut r = Read::new(data);
     let tags = r.blob()?;
@@ -117,9 +129,11 @@ pub(crate) fn decode_into(
     }
     let (mut last_id, mut previous) = (0u64, [0u64; 2]);
     let mut recent = vec![];
+    let mut der = [0; DER_MAX];
     for &tag in tags {
+        let number;
         emit(match tag {
-            0 => Scalar::Literal(value_get(&mut args)?),
+            0 => Scalar::Literal(value_ref(&mut args, &mut der)?),
             1 => Scalar::Repeat,
             2 | 3 => Scalar::ContextDelta(if tag == 2 { 4 } else { 8 }, args.var()?),
             4 => {
@@ -152,7 +166,8 @@ pub(crate) fn decode_into(
                     b[8 - width..].copy_from_slice(args.take(width)?);
                     previous[slot] = u64::from_be_bytes(b);
                 }
-                Scalar::Literal(previous[slot].to_be_bytes()[8 - width..].to_vec())
+                number = previous[slot].to_be_bytes();
+                Scalar::Literal(&number[8 - width..])
             }
             _ => return Err("joint tag".into()),
         })?;
@@ -180,9 +195,9 @@ mod tests {
         let out = decode(&bytes, vals.len(), 1).unwrap();
         for (i, x) in out.into_iter().enumerate() {
             match x {
-                Scalar::Literal(v) => assert_eq!(Some(v), vals[i]),
-                Scalar::Dictionary(id) => assert_eq!(id, 0),
-                Scalar::Repeat => assert!(vals[i].is_none()),
+                Owned::Literal(v) => assert_eq!(Some(v), vals[i]),
+                Owned::Dictionary(id) => assert_eq!(id, 0),
+                Owned::Repeat => assert!(vals[i].is_none()),
                 _ => panic!("unexpected delta"),
             }
         }
@@ -201,8 +216,8 @@ mod tests {
         ];
         let bytes = encode(&values, &[None, Some((8, 2)), None], &HashMap::new(), true).unwrap();
         let out = decode(&bytes, 3, 0).unwrap();
-        assert!(matches!(out[1], Scalar::ContextDelta(8, 2)));
-        assert!(matches!(&out[2],Scalar::Literal(v) if v==&101u64.to_be_bytes()));
+        assert!(matches!(out[1], Owned::ContextDelta(8, 2)));
+        assert!(matches!(&out[2],Owned::Literal(v) if v==&101u64.to_be_bytes()));
     }
     #[test]
     fn recent_dictionary_handles_hits_eviction_and_invalid_position() {
@@ -211,7 +226,7 @@ mod tests {
         let values: Vec<_> = order.iter().map(|&i| Some(vec![i as u8; 20])).collect();
         let data = encode_recent(&values, &vec![None; values.len()], &ids, false, true).unwrap();
         for (item, &expected) in decode(&data, values.len(), 20).unwrap().iter().zip(&order) {
-            assert!(matches!(item,Scalar::Dictionary(id) if *id==expected));
+            assert!(matches!(item,Owned::Dictionary(id) if *id==expected));
         }
         let mut bad = vec![];
         blob(&mut bad, &[9]);

@@ -451,11 +451,18 @@ fn value_put(out: &mut Vec<u8>, b: &[u8], compact: bool) {
     put(out, (b.len() as u64) << 1);
     out.extend(b);
 }
+#[cfg(test)]
 fn value_get(r: &mut Read) -> Res<Vec<u8>> {
+    let mut der = [0; DER_MAX];
+    value_ref(r, &mut der).map(<[u8]>::to_vec)
+}
+/// A stored value: borrowed from the input or, for a compact signature, written
+/// to `der`. Reading a part goes through every value, so nothing is allocated.
+fn value_ref<'b, 'a: 'b>(r: &mut Read<'a>, der: &'b mut [u8; DER_MAX]) -> Res<&'b [u8]> {
     let tag = r.var()?;
     if tag == 1 {
-        let s = k256::ecdsa::Signature::from_slice(r.take(64)?).map_err(er)?;
-        return Ok(s.to_der().as_bytes().to_vec());
+        let n = der_signature(r.take(64)?, der)?;
+        return Ok(&der[..n]);
     }
     if tag & 1 != 0 {
         return Err("value tag".into());
@@ -464,7 +471,40 @@ fn value_get(r: &mut Read) -> Res<Vec<u8>> {
     if n > MAX {
         return Err("value size".into());
     }
-    Ok(r.take(n)?.to_vec())
+    r.take(n)
+}
+/// Longest DER form of a secp256k1 signature.
+const DER_MAX: usize = 72;
+/// Order of secp256k1, big-endian.
+const CURVE_ORDER: [u8; 32] = [
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
+    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
+];
+/// DER form of a 64-byte `r || s` signature, written to `out`; returns its
+/// length. Almost every transaction carries one, so this works on the bytes
+/// instead of going through curve scalars. It accepts and writes exactly what
+/// `k256::ecdsa::Signature` does.
+fn der_signature(rs: &[u8], out: &mut [u8; DER_MAX]) -> Res<usize> {
+    if rs.len() != 64 {
+        return Err("signature size".into());
+    }
+    let (r, s) = rs.split_at(32);
+    let mut at = 2;
+    for v in [r, s] {
+        if v.iter().all(|&b| b == 0) || v >= &CURVE_ORDER[..] {
+            return Err("signature scalar".into());
+        }
+        let v = &v[v.iter().take_while(|&&b| b == 0).count()..];
+        let pad = usize::from(v[0] >= 0x80);
+        out[at] = 2;
+        out[at + 1] = (v.len() + pad) as u8;
+        out[at + 2] = 0;
+        out[at + 2 + pad..at + 2 + pad + v.len()].copy_from_slice(v);
+        at += 2 + pad + v.len();
+    }
+    out[0] = 0x30;
+    out[1] = (at - 2) as u8;
+    Ok(at)
 }
 /// Shapes, contexts and columns of one part; returns delta columns and column bytes.
 fn part_streams(
@@ -1482,6 +1522,53 @@ mod tests {
         let mut rd = Read::new(&encoded);
         assert_eq!(value_get(&mut rd).unwrap(), der.as_bytes());
         rd.end().unwrap();
+    }
+    #[test]
+    fn der_signature_matches_k256() {
+        let order = CURVE_ORDER;
+        let mut below = order;
+        below[31] -= 1;
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        let mut high = [0u8; 32];
+        high[0] = 0x80;
+        let mut low_zeros = [0u8; 32];
+        low_zeros[3] = 0x7F;
+        let mut pad_after_zeros = [0u8; 32];
+        pad_after_zeros[1] = 0xFF;
+        let mut seed = 0x0123_4567_89AB_CDEFu64;
+        let mut random = || {
+            let mut v = [0u8; 32];
+            for b in &mut v {
+                seed = seed.wrapping_mul(0x5DEE_CE66D).wrapping_add(11);
+                *b = (seed >> 24) as u8;
+            }
+            v
+        };
+        let mut scalars = vec![
+            order,
+            below,
+            one,
+            high,
+            low_zeros,
+            pad_after_zeros,
+            [0; 32],
+            [0xFF; 32],
+        ];
+        scalars.extend((0..200).map(|_| random()));
+        for r in &scalars {
+            for s in &scalars {
+                let mut rs = r.to_vec();
+                rs.extend(s);
+                let mut out = [0; DER_MAX];
+                let got = der_signature(&rs, &mut out).map(|n| out[..n].to_vec());
+                match k256::ecdsa::Signature::from_slice(&rs) {
+                    Ok(sig) => assert_eq!(got.unwrap(), sig.to_der().as_bytes()),
+                    Err(_) => assert!(got.is_err()),
+                }
+            }
+        }
+        assert!(der_signature(&[1; 63], &mut [0; DER_MAX]).is_err());
     }
     #[test]
     fn key_recipes_require_exact_digest() {

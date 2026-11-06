@@ -13,6 +13,7 @@ A working setup has four processes. Only `astraea-ingest` is needed to serve the
 
 - An xrpld node with gRPC enabled and a WebSocket port that streams validations. The node's `[secure_gateway]` should list the Astraea host if you don't want it rate-limited.
 - Disk: the hot store grows with state versions; full mainnet history in the cold store takes on the order of 1.2 TB.
+- Memory: the cache of decoded cold blocks grows to about 4 GiB, and up to 1 GiB of it for one segment (`COLD_BUDGET` and `BLOCK_BUDGET` in `crates/ledger-engine/src/cold.rs`). Allow for that on top of what the rest of the server uses.
 - Rust 1.99.1 to build (pinned in `rust-toolchain.toml`).
 
 ## Building

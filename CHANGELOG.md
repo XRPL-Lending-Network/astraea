@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Reading an `account_tx` page again no longer costs as much as the first time. One page that touches many blocks of a segment can hold about 400 MB of decoded blocks, and a segment was allowed 256 MiB, so the page evicted its own blocks while it was being read. A segment may now hold 1 GiB and the whole cache 4 GiB, up from 1 GiB, so a server can use up to 3 GiB more memory. On seven mainnet segments, for pages of 200 transactions spread across a segment, the mean read of a repeated page went from about 40 to 1.1 ms and of a first page from about 54 to 45 ms; for pages of neighbouring transactions, from about 10 to 1.0 ms and from about 30 to 26 ms. This is the storage read alone, in one process on a development machine, and does not include the index lookup or JSON. It has not yet been measured on a production server.
+- Decoding a part of a block no longer allocates for every stored value, and turns compact signatures into DER directly instead of through curve scalars. The output is byte for byte the same on those seven segments, and a test compares the signature code with `k256`.
+
 ## 0.4.0
 
 - The research code that production never used is gone: experiments and measuring tools in the codec package, and finished benchmarks in the engine. That is 46,716 lines of Rust down to 37,092 and 25 binaries down to 7. No format or answer changes. Builds from before and after the cleanup read seven mainnet segments (2.42 million transactions) with identical digests, and rewrote each one byte for byte the same as the file on disk.

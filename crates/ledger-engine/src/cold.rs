@@ -105,15 +105,16 @@ impl Default for BlockLimit {
 /// costs little.
 pub const COLD_OPEN: usize = 64;
 /// Byte budget for the prepared blocks of all open segments (codec estimate).
-/// Shared rather than split per segment: a busy account's page can need a
-/// few dozen blocks of about 7 MB from one segment, while most open segments
-/// hold one or two.
-pub const COLD_BUDGET: usize = 1 << 30;
+/// Shared rather than split per segment: a busy account's page can hold about
+/// 400 MB of one segment's blocks, while most open segments hold one or two.
+pub const COLD_BUDGET: usize = 4 << 30;
 /// Most of the cold cache one segment may hold, and the number of concurrent
 /// prepares per segment. A block takes about 10 ms to prepare, and one
 /// account_tx page can need dozens of blocks from a single segment, so a
-/// segment prepares as many at once as one request reads in parallel.
-pub const BLOCK_BUDGET: usize = 256 << 20;
+/// segment prepares as many at once as one request reads in parallel. Below
+/// what one page needs, a page evicts its own blocks and reading it again costs
+/// as much as the first time.
+pub const BLOCK_BUDGET: usize = 1 << 30;
 pub const PREPARES: usize = COLD_READERS;
 /// Threads one `Cold::ledgers` call reads with.
 pub const COLD_READERS: usize = 8;

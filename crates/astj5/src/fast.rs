@@ -87,8 +87,9 @@ type IdMap = HashMap<usize, usize, std::hash::BuildHasherDefault<PairHasher>>;
 fn value_append(r: &mut Read<'_>, pool: &mut Vec<u8>) -> Res<Atom> {
     let tag = r.var()?;
     if tag == 1 {
-        let s = k256::ecdsa::Signature::from_slice(r.take(64)?).map_err(er)?;
-        return append(pool, s.to_der().as_bytes());
+        let mut der = [0; DER_MAX];
+        let n = der_signature(r.take(64)?, &mut der)?;
+        return append(pool, &der[..n]);
     }
     if tag & 1 != 0 {
         return Err("value tag".into());
@@ -761,7 +762,7 @@ impl Prepared {
             if mode != 2 && count > c.b.len() {
                 return Err("count exceeds input".into());
             }
-            let mut items = vec![];
+            let mut items = Vec::with_capacity(count.min(c.b.len()));
             match mode {
                 0 => {
                     for _ in 0..count {
@@ -800,7 +801,7 @@ impl Prepared {
                     let data = c.take(c.b.len() - c.p)?;
                     joint::decode_into(data, count, dict_len, |token| {
                         items.push(match token {
-                            joint::Scalar::Literal(v) => Item::Value(append(pool, &v)?),
+                            joint::Scalar::Literal(v) => Item::Value(append(pool, v)?),
                             joint::Scalar::Dictionary(id) => {
                                 Item::Value(lookup(id).ok_or("dictionary id")?)
                             }
