@@ -67,7 +67,9 @@ astraea-ingest \
 | `--publishers` | UNL publisher keys to trust, hex; defaults to vl.ripple.com and unl.xrplf.org |
 | `--api-addr` | where to serve JSON-RPC and WebSocket, one or more addresses, comma separated; no API without it. An address that is busy is retried every 10 s, so Astraea takes over a port as soon as the server holding it stops |
 | `--forward-rpc` | node JSON-RPC endpoints for forwarded methods; without them those methods return `unknownCmd` |
-| `--forward-timeout` | per-node timeout for forwarding, seconds (default 5) |
+| `--forward-timeout` | per-node timeout for forwarding, seconds (default 5); one request has 8 seconds over all nodes |
+| `--forward-submissions` | forward `submit` and `simulate` on `--api-addr`; off by default, and never on a public listener |
+| `--public-api-addr` | addresses for public clients, with their own slots and limits; see [Public access](#public-access) |
 | `--network-id` | network ID for CTIDs, 0 for mainnet |
 | `--metrics-addr` | Prometheus metrics, described in [metrics.md](metrics.md) |
 | `--max-requests` | weighted requests per client per interval; with none of the three limits, clients are not limited |
@@ -83,7 +85,27 @@ Astraea serves at most 32 requests at once, 4 of them proofs, and gives each req
 
 ### Public access
 
-Per-client limits work like Clio's `dos_guard`. A client over its request or byte budget, or at its connection cap, gets `slowDown` until the interval ends: over HTTP as status 503, over WebSocket as an error response. Requests that walk many objects count more: a proof 10, `ledger_data` and a ledger with expanded transactions 5, `account_tx`, `nft_history`, `book_changes` and `nfts_by_issuer` 2, the rest 1. Your own services go in `--limit-whitelist`.
+Serve strangers on their own address, `--public-api-addr`, and keep your own services on `--api-addr`. Limits per client alone don't protect your services: many addresses, each within its budget, can still fill every request slot. So the two doors don't share slots:
+
+| | `--api-addr` | `--public-api-addr` |
+|---|---|---|
+| Requests at a time | 32 | `--public-max-inflight`, 8 |
+| Proof bundles at a time | 4 | `--public-max-proofs`, 1 |
+| Requests to a node at a time | 16 | `--public-max-forwards`, 4 |
+| Time for one request | 10 s | 5 s |
+| Wait for a slot | 5 s | 0.5 s |
+| Limits per client | none | required, see below |
+| `submit`, `simulate` | with `--forward-submissions` | never |
+| `ripple_path_find` | forwarded | never |
+| Largest request | 2 MiB over HTTP | 256 KiB |
+| WebSocket sessions | no cap | `--public-max-sessions`, 256 |
+| Accounts per session | 10,000 per subscribe | `--public-max-accounts`, 100 |
+
+When `--api-addr` has fewer than 8 free slots, the public door answers `tooBusy` at once. This protects the queue, not the machine: disk and CPU stay shared, so limit traffic at the edge too and measure the public slots under load before raising them. Metrics count public requests under the transports `public_http` and `public_ws`, and `astraea_api_inflight` has a pool for each budget.
+
+Without `--public-api-addr`, the limits apply to `--api-addr`.
+
+Per-client limits work like Clio's `dos_guard`. A client over its request or byte budget, or at its connection cap, gets `slowDown` until the interval ends: over HTTP as status 503, over WebSocket as an error response. Requests that walk many objects count more: a proof 10, `ledger_data` and a ledger with expanded transactions 5, forwarded requests 3, `account_tx`, `nft_history`, `book_changes` and `nfts_by_issuer` 2, the rest 1. Addresses that must never be limited go in `--limit-whitelist`.
 
 Behind a proxy every request comes from the proxy's address. List the proxy in `--trusted-proxies` (for `cloudflared` on the same host, `127.0.0.1`), and the client is taken from `CF-Connecting-IP`, the last `for=` of `Forwarded`, or the first address of `X-Forwarded-For`. These headers are ignored from anyone else, so a client can't pose as another.
 

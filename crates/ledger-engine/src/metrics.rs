@@ -127,6 +127,12 @@ pub struct Api {
     /// Requests being served now, regular and proofs.
     pub inflight: u64,
     pub inflight_proofs: u64,
+    pub inflight_forwards: u64,
+    /// The same on the public listeners, and their open sessions.
+    pub public_inflight: u64,
+    pub public_inflight_proofs: u64,
+    pub public_inflight_forwards: u64,
+    pub public_sessions: u64,
     /// Sessions subscribed to each stream, and accounts subscribed in all.
     pub subscribers: BTreeMap<&'static str, u64>,
     pub subscribed_accounts: u64,
@@ -242,6 +248,13 @@ impl Api {
         );
         family(
             out,
+            "astraea_api_public_sessions",
+            "gauge",
+            "WebSocket sessions open on the public listeners.",
+            [(String::new(), self.public_sessions.to_string())],
+        );
+        family(
+            out,
             "astraea_api_inflight",
             "gauge",
             "Requests being served now, by pool: regular requests and proof bundles.",
@@ -250,6 +263,22 @@ impl Api {
                 (
                     "pool=\"proof\"".to_owned(),
                     self.inflight_proofs.to_string(),
+                ),
+                (
+                    "pool=\"forward\"".to_owned(),
+                    self.inflight_forwards.to_string(),
+                ),
+                (
+                    "pool=\"public_api\"".to_owned(),
+                    self.public_inflight.to_string(),
+                ),
+                (
+                    "pool=\"public_proof\"".to_owned(),
+                    self.public_inflight_proofs.to_string(),
+                ),
+                (
+                    "pool=\"public_forward\"".to_owned(),
+                    self.public_inflight_forwards.to_string(),
                 ),
             ],
         );

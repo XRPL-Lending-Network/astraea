@@ -119,6 +119,30 @@ struct Args {
     /// client, comma-separated (for a tunnel on the same host: 127.0.0.1).
     #[arg(long, value_delimiter = ',')]
     trusted_proxies: Vec<ledger_engine::guard::Net>,
+    /// Addresses of the public API, comma-separated. These have their own request
+    /// slots, smaller than and separate from those of --api-addr, and give way
+    /// when --api-addr is busy. The limits above then apply to them alone, and
+    /// are required. Without this the limits apply to --api-addr.
+    #[arg(long, value_delimiter = ',')]
+    public_api_addr: Vec<SocketAddr>,
+    /// Requests the public API serves at a time.
+    #[arg(long, default_value_t = 8)]
+    public_max_inflight: usize,
+    /// Proof bundles the public API builds at a time.
+    #[arg(long, default_value_t = 1)]
+    public_max_proofs: usize,
+    /// Requests the public API forwards to a node at a time.
+    #[arg(long, default_value_t = 4)]
+    public_max_forwards: usize,
+    /// WebSocket sessions open on the public API at a time, over all clients.
+    #[arg(long, default_value_t = 256)]
+    public_max_sessions: usize,
+    /// Accounts one public WebSocket session may subscribe to.
+    #[arg(long, default_value_t = 100)]
+    public_max_accounts: usize,
+    /// Forward submit and simulate to the node on --api-addr. Never on the public API.
+    #[arg(long)]
+    forward_submissions: bool,
     /// Network NetworkID for ctid: 0 is mainnet.
     #[arg(long, default_value_t = 0)]
     network_id: u32,
@@ -645,6 +669,11 @@ async fn run(args: Args) -> Result<(), String> {
             whitelist: args.limit_whitelist.clone(),
             trusted_proxies: args.trusted_proxies.clone(),
         };
+        if !args.public_api_addr.is_empty() && !guard.enabled() {
+            return Err("--public-api-addr needs limits: set --max-requests, \
+                        --max-response-bytes or --max-connections"
+                .into());
+        }
         if guard.enabled() {
             info!(
                 "client limits: {:?} requests, {:?} bytes per {} s, {:?} connections",
@@ -654,12 +683,30 @@ async fn run(args: Args) -> Result<(), String> {
                 guard.max_connections
             );
         }
+        let (own_limits, public) = if args.public_api_addr.is_empty() {
+            (guard, None)
+        } else {
+            let public = server::PublicConfig {
+                addrs: args.public_api_addr.clone(),
+                limits: guard,
+                max_inflight: args.public_max_inflight.max(1),
+                max_proofs: args.public_max_proofs.max(1),
+                max_forwards: args.public_max_forwards.max(1),
+                max_sessions: args.public_max_sessions.max(1),
+                max_accounts: args.public_max_accounts,
+            };
+            (Default::default(), Some(public))
+        };
         tokio::spawn(server::serve(
             args.api_addr.clone(),
             engine,
             forwarder,
             metrics.clone(),
-            guard,
+            server::ServeConfig {
+                own_limits,
+                forward_submissions: args.forward_submissions,
+                public,
+            },
             Some(node_streams.clone()),
         ));
     }

@@ -118,6 +118,8 @@ pub fn weight(method: &str, params: &Map<String, Value>) -> u64 {
         "ledger_data" => 5,
         "ledger" if flag("transactions") && flag("expand") => 5,
         "account_tx" | "nft_history" | "book_changes" | "nfts_by_issuer" => 2,
+        // The work falls on a node, which doesn't limit us.
+        _ if crate::forward::forwarded(method, params) => 3,
         _ => 1,
     }
 }
@@ -385,5 +387,6 @@ mod tests {
             5
         );
         assert_eq!(weight("proof_tx", &Map::new()), 10);
+        assert_eq!(weight("fee", &Map::new()), 3);
     }
 }

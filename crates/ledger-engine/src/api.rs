@@ -469,6 +469,17 @@ impl Engine {
         }
     }
 
+    /// The last ledger served and how many seconds ago it closed.
+    pub fn last_ledger_age(&self) -> Res<(u32, i64)> {
+        let (_, max) = self.range()?;
+        let (_, h) = self.header(max)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        Ok((max, (now - RIPPLE_EPOCH - i64::from(h.close_time)).max(0)))
+    }
+
     fn server_info(&self) -> Res<Map<String, Value>> {
         let (min, max) = self.range()?;
         let (_, h) = self.header(max)?;

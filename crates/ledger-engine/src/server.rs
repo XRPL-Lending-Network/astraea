@@ -9,7 +9,17 @@
 //! Requests are served on a blocking task pool (fjall and zstd are synchronous),
 //! at most `MAX_INFLIGHT` at a time; proof bundles have their own
 //! budget, `MAX_PROOFS`, and no queue: when it is full they are refused with `tooBusy`.
-//! Each request has `REQUEST_LIMIT` to finish (`limits`), then ends with `tooBusy`.
+//! Requests to a node have their own budget too, `MAX_FORWARDS`, so that nodes
+//! that stopped answering can't hold the slots that reads need. A request waits
+//! at most `QUEUE_WAIT` for a slot and has `REQUEST_LIMIT` to finish (`limits`);
+//! past either it ends with `tooBusy`.
+//!
+//! Public listeners (`PublicConfig`) are a separate door to the same data: their
+//! slots are their own, so public load can't fill those of `--api-addr`, the
+//! limits of `guard` apply there and only there, and when the other door has
+//! fewer than `OWN_HEADROOM` free slots they step aside with `tooBusy`. This
+//! protects the queue, not the machine: disk and CPU stay shared, which is why
+//! the public slots are few.
 //!
 //! subscribe and unsubscribe work only over WebSocket; `subs` keeps the subscriptions.
 //! A session interleaves responses to requests with messages from its queue.
@@ -32,17 +42,17 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use futures_util::SinkExt;
 use serde_json::{Map, Value, json};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
 
 use crate::api::{Engine, RpcError, api_version};
-use crate::forward::{Forwarder, forwarded, node_info};
+use crate::forward::{Forwarder, forwarded, node_info, submission, submission_params};
 use crate::guard::{Guard, GuardConfig, weight};
 use crate::metrics::{self, lock};
 use crate::subs::{self, Hub};
@@ -50,6 +60,23 @@ use crate::subs::{self, Hub};
 const MAX_INFLIGHT: usize = 32;
 /// Proof bundles are expensive to build: at most this many at a time.
 const MAX_PROOFS: usize = 4;
+/// Requests to a node at a time.
+const MAX_FORWARDS: usize = 16;
+/// How long a request waits for a slot before it is refused.
+const QUEUE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// The same on a public listener, and how long a request may run there.
+const PUBLIC_QUEUE_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+const PUBLIC_REQUEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// A public listener refuses requests when `--api-addr` has fewer free slots than this.
+const OWN_HEADROOM: usize = 8;
+/// Largest request a public listener takes, over HTTP or in one WebSocket message.
+const PUBLIC_MESSAGE: usize = 256 * 1024;
+/// Methods a public listener doesn't take: they change the network or make a
+/// node do unbounded work on behalf of a stranger.
+const NOT_PUBLIC: [&str; 3] = ["submit", "simulate", "ripple_path_find"];
+/// `/health` reports a problem when the last ledger is older than this; ledgers
+/// close every 3 to 5 seconds, and a network-wide pause has been seen to last 49.
+const HEALTHY_AGE: i64 = 60;
 /// How long one request may run (see `limits`). Real requests take well under
 /// a second; the slowest, a full `ledger_data` page, about 0.7 s.
 const REQUEST_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -61,16 +88,105 @@ const IMMUTABLE: &str = "public, max-age=86400, immutable";
 
 type ProofCache = std::sync::Mutex<std::collections::VecDeque<(String, Map<String, Value>)>>;
 
+/// How the server listens beyond its addresses.
+#[derive(Debug, Clone, Default)]
+pub struct ServeConfig {
+    /// Limits per client on `--api-addr`; off when there is a public listener.
+    pub own_limits: GuardConfig,
+    /// Forward `submit` and `simulate` on `--api-addr`.
+    pub forward_submissions: bool,
+    pub public: Option<PublicConfig>,
+}
+
+/// Listeners for strangers, with their own slots and limits.
+#[derive(Debug, Clone)]
+pub struct PublicConfig {
+    pub addrs: Vec<SocketAddr>,
+    pub limits: GuardConfig,
+    pub max_inflight: usize,
+    pub max_proofs: usize,
+    pub max_forwards: usize,
+    pub max_sessions: usize,
+    pub max_accounts: usize,
+}
+
+/// What differs between `--api-addr` and a public listener.
+#[derive(Debug, Clone)]
+struct Public {
+    /// Slots of `--api-addr`, to step aside when they run low.
+    own_inflight: Arc<Semaphore>,
+    sessions: Arc<Semaphore>,
+    max_accounts: usize,
+}
+
 #[derive(Debug, Clone)]
 struct Shared {
     engine: Arc<Engine>,
     inflight: Arc<Semaphore>,
     proofs: Arc<Semaphore>,
+    forwards: Arc<Semaphore>,
     cache: Arc<ProofCache>,
     forwarder: Option<Arc<Forwarder>>,
     hub: Arc<Hub>,
     metrics: metrics::Shared,
     guard: Arc<Guard>,
+    forward_submissions: bool,
+    public: Option<Public>,
+}
+
+fn too_busy() -> RpcError {
+    RpcError {
+        error: "tooBusy",
+        code: 9,
+        message: "The server is too busy to help you now.".into(),
+    }
+}
+
+fn internal(e: impl std::fmt::Display) -> RpcError {
+    RpcError {
+        error: "internal",
+        code: 73,
+        message: e.to_string(),
+    }
+}
+
+fn unknown_method() -> RpcError {
+    RpcError {
+        error: "unknownCmd",
+        code: 32,
+        message: "Unknown method.".into(),
+    }
+}
+
+impl Shared {
+    /// A public listener steps aside while the other one is short of slots.
+    fn must_step_aside(&self) -> bool {
+        self.public
+            .as_ref()
+            .is_some_and(|p| p.own_inflight.available_permits() < OWN_HEADROOM)
+    }
+
+    /// A slot from `pool`, waiting only so long.
+    async fn slot(&self, pool: &Arc<Semaphore>) -> Result<OwnedSemaphorePermit, RpcError> {
+        if self.must_step_aside() {
+            return Err(too_busy());
+        }
+        let wait = if self.public.is_some() {
+            PUBLIC_QUEUE_WAIT
+        } else {
+            QUEUE_WAIT
+        };
+        match tokio::time::timeout(wait, pool.clone().acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            Ok(Err(e)) => Err(internal(e)),
+            Err(_) => Err(too_busy()),
+        }
+    }
+
+    /// The name a request is counted under: public traffic apart from our own.
+    fn transport(&self, own: &'static str, public: &'static str) -> &'static str {
+        if self.public.is_some() { public } else { own }
+    }
 }
 
 fn slow_down() -> RpcError {
@@ -227,33 +343,38 @@ enum Reply {
 }
 
 async fn call(s: &Shared, method: String, params: Map<String, Value>) -> Result<Reply, RpcError> {
+    if s.public.is_some() && NOT_PUBLIC.contains(&method.as_str()) {
+        return Err(RpcError {
+            error: "notSupported",
+            code: 75,
+            message: "Not supported on the public endpoint.".into(),
+        });
+    }
+    if submission(&method) {
+        let (true, Some(f)) = (s.forward_submissions, s.forwarder.clone()) else {
+            return Err(unknown_method());
+        };
+        let params = submission_params(&method, &params)?;
+        let _permit = s.slot(&s.forwards).await?;
+        return tokio::task::spawn_blocking(move || {
+            if method == "submit" {
+                f.send_transaction(&params)
+            } else {
+                f.forward(&method, &params)
+            }
+        })
+        .await
+        .unwrap_or_else(|e| Err(internal(e)))
+        .map(Reply::Forwarded);
+    }
     if forwarded(&method, &params) {
         let Some(f) = s.forwarder.clone() else {
-            return Err(RpcError {
-                error: "unknownCmd",
-                code: 32,
-                message: "Unknown method.".into(),
-            });
+            return Err(unknown_method());
         };
-        let _permit = s
-            .inflight
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| RpcError {
-                error: "internal",
-                code: 73,
-                message: e.to_string(),
-            })?;
+        let _permit = s.slot(&s.forwards).await?;
         return tokio::task::spawn_blocking(move || f.forward(&method, &params))
             .await
-            .unwrap_or_else(|e| {
-                Err(RpcError {
-                    error: "internal",
-                    code: 73,
-                    message: e.to_string(),
-                })
-            })
+            .unwrap_or_else(|e| Err(internal(e)))
             .map(Reply::Forwarded);
     }
     let info = method == "server_info";
@@ -276,21 +397,15 @@ async fn call_own(
     // Bundles have their own budget and no queue: if it is full, refuse at once so
     // that waiting bundles don't take slots from the regular API.
     let _permit = if is_proof {
-        s.proofs.clone().try_acquire_owned().map_err(|_| RpcError {
-            error: "tooBusy",
-            code: 9,
-            message: "The server is too busy to help you now.".into(),
-        })?
-    } else {
-        s.inflight
+        if s.must_step_aside() {
+            return Err(too_busy());
+        }
+        s.proofs
             .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| RpcError {
-                error: "internal",
-                code: 73,
-                message: e.to_string(),
-            })?
+            .try_acquire_owned()
+            .map_err(|_| too_busy())?
+    } else {
+        s.slot(&s.inflight).await?
     };
     // A bundle for a transaction, or for a ledger given by explicit sequence or hash,
     // never changes, so it comes from the cache. An object bundle is for the latest
@@ -315,18 +430,17 @@ async fn call_own(
     }
     let engine = s.engine.clone();
     let name = method.clone();
+    let limit = if s.public.is_some() {
+        PUBLIC_REQUEST_LIMIT
+    } else {
+        REQUEST_LIMIT
+    };
     let result = tokio::task::spawn_blocking(move || {
-        let _limit = crate::limits::start(REQUEST_LIMIT);
+        let _limit = crate::limits::start(limit);
         engine.handle(&method, &params)
     })
     .await
-    .unwrap_or_else(|e| {
-        Err(RpcError {
-            error: "internal",
-            code: 73,
-            message: e.to_string(),
-        })
-    });
+    .unwrap_or_else(|e| Err(internal(e)));
     if is_proof
         && let Ok(r) = &result
         && let Some(by) = r
@@ -354,9 +468,10 @@ async fn http_rpc(
     headers: HeaderMap,
     body: String,
 ) -> Response {
+    let transport = s.transport("http", "public_http");
     let client = s.guard.client(peer.ip(), &headers);
     let Some(_connection) = s.guard.connect(client) else {
-        record(&s, "http", "", &Err(slow_down()), Instant::now(), 0);
+        record(&s, transport, "", &Err(slow_down()), Instant::now(), 0);
         return slow_down_http();
     };
     let request: Value = match serde_json::from_str(&body) {
@@ -379,16 +494,12 @@ async fn http_rpc(
     if let Ok(p) = &params
         && !s.guard.request(client, weight(&method, p))
     {
-        record(&s, "http", &method, &Err(slow_down()), started, 0);
+        record(&s, transport, &method, &Err(slow_down()), started, 0);
         return slow_down_http();
     }
     let result = match &params {
         Ok(p) if !method.is_empty() => call(&s, method.clone(), p.clone()).await,
-        Ok(_) => Err(RpcError {
-            error: "unknownCmd",
-            code: 32,
-            message: "Unknown method.".into(),
-        }),
+        Ok(_) => Err(unknown_method()),
         Err(e) => Err(e.clone()),
     };
     let cache = match &params {
@@ -411,7 +522,7 @@ async fn http_rpc(
         Err(e) => json!({ "result": error_fields(e, &request), "warnings": warnings() }),
     }
     .to_string();
-    record(&s, "http", &method, &result, started, body.len());
+    record(&s, transport, &method, &result, started, body.len());
     s.guard.sent(client, body.len());
     (
         [
@@ -429,15 +540,37 @@ async fn ws_upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let transport = s.transport("ws", "public_ws");
     let client = s.guard.client(peer.ip(), &headers);
     if s.guard.connect(client).is_none() {
-        record(&s, "ws", "", &Err(slow_down()), Instant::now(), 0);
+        record(&s, transport, "", &Err(slow_down()), Instant::now(), 0);
         return slow_down_http();
     }
-    ws.on_upgrade(move |socket| ws_session(s, socket, client))
+    // Cap on all public sessions together: per-client limits don't bound a crowd.
+    let session = match &s.public {
+        Some(p) => match p.sessions.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                record(&s, transport, "", &Err(slow_down()), Instant::now(), 0);
+                return slow_down_http();
+            }
+        },
+        None => None,
+    };
+    let ws = if s.public.is_some() {
+        ws.max_message_size(PUBLIC_MESSAGE)
+    } else {
+        ws
+    };
+    ws.on_upgrade(move |socket| ws_session(s, socket, client, session))
 }
 
-async fn ws_session(s: Shared, mut socket: WebSocket, client: std::net::IpAddr) {
+async fn ws_session(
+    s: Shared,
+    mut socket: WebSocket,
+    client: std::net::IpAddr,
+    _session: Option<OwnedSemaphorePermit>,
+) {
     // The session holds a connection slot for as long as it is open. A client
     // that reached its cap between the upgrade check and here is closed.
     let guard = s.guard.clone();
@@ -499,6 +632,15 @@ async fn subscription(
         s.hub.unsubscribe(id, &r);
         return Ok(Reply::Own(Map::new()));
     }
+    if let Some(p) = &s.public
+        && s.hub.accounts_of(id) + r.accounts.len() > p.max_accounts
+    {
+        return Err(RpcError {
+            error: "invalidParams",
+            code: 31,
+            message: "accountsTooMany".into(),
+        });
+    }
     if !r.ledger {
         s.hub.subscribe(id, &r, api, 0);
         return Ok(Reply::Own(Map::new()));
@@ -511,24 +653,19 @@ async fn subscription(
         engine.ledger_stream(max, None)
     })
     .await
-    .unwrap_or_else(|e| {
-        Err(RpcError {
-            error: "internal",
-            code: 73,
-            message: e.to_string(),
-        })
-    })
+    .unwrap_or_else(|e| Err(internal(e)))
     .map(Reply::Own)
 }
 
 async fn ws_answer(s: &Shared, id: u64, text: &str, client: std::net::IpAddr) -> String {
+    let transport = s.transport("ws", "public_ws");
     let started = Instant::now();
     let Ok(Value::Object(request)) = serde_json::from_str::<Value>(text) else {
         let e = bad_syntax();
         let mut m = error_fields(&e, &json!(text));
         m.insert("warnings".into(), warnings());
         let body = Value::Object(m).to_string();
-        record(s, "ws", "", &Err(e), started, body.len());
+        record(s, transport, "", &Err(e), started, body.len());
         return body;
     };
     let method = request
@@ -585,20 +722,59 @@ async fn ws_answer(s: &Shared, id: u64, text: &str, client: std::net::IpAddr) ->
     m.insert("type".into(), json!("response"));
     m.insert("warnings".into(), warnings());
     let body = Value::Object(m).to_string();
-    record(s, "ws", &method, &result, started, body.len());
+    record(s, transport, &method, &result, started, body.len());
     s.guard.sent(client, body.len());
     body
 }
 
-/// The API routes over one set of subscriptions, which starts publishing here.
-fn app(
-    engine: Arc<Engine>,
-    forwarder: Option<Arc<Forwarder>>,
-    metrics: metrics::Shared,
-    guard: GuardConfig,
-    streams: Option<crate::confirm::NodeStreams>,
-) -> Router {
-    let guard = Arc::new(Guard::new(guard));
+/// Whether the server keeps up: 200 while the last ledger is recent, 503 when it
+/// is old or there is none. This is what stopped being true on the day the nodes'
+/// network went down, while the connection gauges still read 1.
+async fn health(
+    State(s): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let client = s.guard.client(peer.ip(), &headers);
+    if !s.guard.request(client, 1) {
+        return slow_down_http();
+    }
+    let engine = s.engine.clone();
+    let last = tokio::task::spawn_blocking(move || engine.last_ledger_age())
+        .await
+        .unwrap_or_else(|e| Err(internal(e)));
+    let (status, body) = health_answer(last.ok());
+    (
+        status,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+fn health_answer(last: Option<(u32, i64)>) -> (axum::http::StatusCode, Value) {
+    use axum::http::StatusCode;
+    match last {
+        Some((ledger, age)) if age <= HEALTHY_AGE => (
+            StatusCode::OK,
+            json!({"status": "ok", "ledger": ledger, "age": age}),
+        ),
+        Some((ledger, age)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"status": "lagging", "ledger": ledger, "age": age}),
+        ),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"status": "noLedger"}),
+        ),
+    }
+}
+
+fn start_guard(config: GuardConfig) -> Arc<Guard> {
+    let guard = Arc::new(Guard::new(config));
     if let Some(every) = guard.sweep_every() {
         let g = guard.clone();
         tokio::spawn(async move {
@@ -608,24 +784,91 @@ fn app(
             }
         });
     }
+    guard
+}
+
+fn routes(shared: Shared) -> Router {
+    Router::new()
+        .route("/", get(ws_upgrade).post(http_rpc))
+        .route("/health", get(health))
+        .with_state(shared)
+}
+
+/// The routes of `--api-addr` and of the public listeners, over one set of
+/// subscriptions, which starts publishing here.
+fn apps(
+    engine: Arc<Engine>,
+    forwarder: Option<Arc<Forwarder>>,
+    metrics: metrics::Shared,
+    config: ServeConfig,
+    streams: Option<crate::confirm::NodeStreams>,
+) -> (Router, Option<Router>) {
     let shared = Shared {
         engine,
         inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
         proofs: Arc::new(Semaphore::new(MAX_PROOFS)),
+        forwards: Arc::new(Semaphore::new(MAX_FORWARDS)),
         cache: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         forwarder,
         hub: Arc::new(Hub::default()),
         metrics,
-        guard,
+        guard: start_guard(config.own_limits),
+        forward_submissions: config.forward_submissions,
+        public: None,
     };
     tokio::spawn(subs::run(shared.engine.clone(), shared.hub.clone()));
     if let Some(s) = streams {
         tokio::spawn(subs::forward_streams(shared.hub.clone(), s.subscribe()));
     }
+    let public = config.public.map(|p| {
+        let public = Shared {
+            inflight: Arc::new(Semaphore::new(p.max_inflight)),
+            proofs: Arc::new(Semaphore::new(p.max_proofs)),
+            forwards: Arc::new(Semaphore::new(p.max_forwards)),
+            guard: start_guard(p.limits),
+            forward_submissions: false,
+            public: Some(Public {
+                own_inflight: shared.inflight.clone(),
+                sessions: Arc::new(Semaphore::new(p.max_sessions)),
+                max_accounts: p.max_accounts,
+            }),
+            ..shared.clone()
+        };
+        tokio::spawn(sample_public(
+            public.clone(),
+            p.max_inflight,
+            p.max_proofs,
+            p.max_forwards,
+            p.max_sessions,
+        ));
+        routes(public).layer(DefaultBodyLimit::max(PUBLIC_MESSAGE))
+    });
     tokio::spawn(sample(shared.clone()));
-    Router::new()
-        .route("/", get(ws_upgrade).post(http_rpc))
-        .with_state(shared)
+    (routes(shared), public)
+}
+
+/// Every few seconds, how much of the public listeners' budgets is in use.
+async fn sample_public(
+    s: Shared,
+    max_inflight: usize,
+    max_proofs: usize,
+    max_forwards: usize,
+    max_sessions: usize,
+) {
+    loop {
+        {
+            let free = s
+                .public
+                .as_ref()
+                .map_or(max_sessions, |p| p.sessions.available_permits());
+            let mut m = lock(&s.metrics);
+            m.api.public_inflight = (max_inflight - s.inflight.available_permits()) as u64;
+            m.api.public_inflight_proofs = (max_proofs - s.proofs.available_permits()) as u64;
+            m.api.public_inflight_forwards = (max_forwards - s.forwards.available_permits()) as u64;
+            m.api.public_sessions = (max_sessions - free) as u64;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
 }
 
 /// Every few seconds, what is happening now: requests in progress and
@@ -637,6 +880,7 @@ async fn sample(s: Shared) {
             let mut m = lock(&s.metrics);
             m.api.inflight = (MAX_INFLIGHT - s.inflight.available_permits()) as u64;
             m.api.inflight_proofs = (MAX_PROOFS - s.proofs.available_permits()) as u64;
+            m.api.inflight_forwards = (MAX_FORWARDS - s.forwards.available_permits()) as u64;
             m.api.subscribers = [
                 ("ledger", h.ledger),
                 ("transactions", h.transactions),
@@ -663,12 +907,20 @@ pub async fn serve(
     engine: Arc<Engine>,
     forwarder: Option<Arc<Forwarder>>,
     metrics: metrics::Shared,
-    guard: GuardConfig,
+    config: ServeConfig,
     streams: Option<crate::confirm::NodeStreams>,
 ) {
-    let app = app(engine, forwarder, metrics, guard, streams);
-    for addr in addrs {
-        let app = app.clone();
+    let public_addrs = config
+        .public
+        .as_ref()
+        .map_or_else(Vec::new, |p| p.addrs.clone());
+    let (own, public) = apps(engine, forwarder, metrics, config, streams);
+    let mut listeners: Vec<(SocketAddr, Router)> =
+        addrs.into_iter().map(|a| (a, own.clone())).collect();
+    if let Some(public) = public {
+        listeners.extend(public_addrs.into_iter().map(|a| (a, public.clone())));
+    }
+    for (addr, app) in listeners {
         tokio::spawn(async move {
             loop {
                 match tokio::net::TcpListener::bind(addr).await {
@@ -697,6 +949,221 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::CloseFrame;
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
+    /// Starts a router on a free port.
+    async fn listen(routes: Router) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let svc = routes.into_make_service_with_connect_info::<SocketAddr>();
+        tokio::spawn(async move { axum::serve(listener, svc).await });
+        addr
+    }
+
+    fn public_config() -> PublicConfig {
+        PublicConfig {
+            addrs: Vec::new(),
+            limits: GuardConfig {
+                max_requests: Some(1000),
+                sweep: std::time::Duration::from_secs(3600),
+                ..GuardConfig::default()
+            },
+            max_inflight: 2,
+            max_proofs: 1,
+            max_forwards: 1,
+            max_sessions: 1,
+            max_accounts: 1,
+        }
+    }
+
+    /// HTTP status and body of one JSON-RPC request.
+    async fn post(addr: SocketAddr, body: String) -> (u16, String) {
+        tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut r = agent.post(&format!("http://{addr}/")).send(body).unwrap();
+            (r.status().as_u16(), r.body_mut().read_to_string().unwrap())
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_public_door_has_its_own_slots_and_steps_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = Shared {
+            engine: Arc::new(test_engine(dir.path())),
+            inflight: Arc::new(Semaphore::new(MAX_INFLIGHT)),
+            proofs: Arc::new(Semaphore::new(MAX_PROOFS)),
+            forwards: Arc::new(Semaphore::new(MAX_FORWARDS)),
+            cache: Default::default(),
+            forwarder: None,
+            hub: Default::default(),
+            metrics: Default::default(),
+            guard: Arc::new(Guard::default()),
+            forward_submissions: false,
+            public: None,
+        };
+        let public = Shared {
+            inflight: Arc::new(Semaphore::new(2)),
+            public: Some(Public {
+                own_inflight: shared.inflight.clone(),
+                sessions: Arc::new(Semaphore::new(1)),
+                max_accounts: 1,
+            }),
+            ..shared.clone()
+        };
+        // Filling the public slots leaves our own untouched.
+        let held: Vec<_> = (0..2)
+            .map(|_| public.inflight.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert_eq!(shared.inflight.available_permits(), MAX_INFLIGHT);
+        let t = Instant::now();
+        let e = public.slot(&public.inflight).await.unwrap_err();
+        assert_eq!(e.error, "tooBusy");
+        assert!(t.elapsed() < QUEUE_WAIT);
+        assert!(shared.slot(&shared.inflight).await.is_ok());
+        drop(held);
+        // With our own slots running out, the public door refuses at once.
+        assert!(public.slot(&public.inflight).await.is_ok());
+        let busy: Vec<_> = (0..=MAX_INFLIGHT - OWN_HEADROOM)
+            .map(|_| shared.inflight.clone().try_acquire_owned().unwrap())
+            .collect();
+        let t = Instant::now();
+        assert_eq!(
+            public.slot(&public.inflight).await.unwrap_err().error,
+            "tooBusy"
+        );
+        assert!(t.elapsed() < std::time::Duration::from_millis(100));
+        assert!(shared.slot(&shared.inflight).await.is_ok());
+        drop(busy);
+    }
+
+    #[tokio::test]
+    async fn submissions_stay_off_the_public_door_and_off_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let forwarder = Arc::new(Forwarder::new(
+            vec!["http://127.0.0.1:1".into()],
+            std::time::Duration::from_secs(1),
+        ));
+        let config = ServeConfig {
+            forward_submissions: true,
+            public: Some(public_config()),
+            ..ServeConfig::default()
+        };
+        let (own, public) = apps(
+            Arc::new(test_engine(dir.path())),
+            Some(forwarder.clone()),
+            metrics::Shared::default(),
+            config,
+            None,
+        );
+        let own = listen(own).await;
+        let public = listen(public.unwrap()).await;
+        let submit = r#"{"method":"submit","params":[{"tx_blob":"00"}]}"#.to_owned();
+        let (_, on_public) = post(public, submit.clone()).await;
+        assert!(
+            on_public.contains(r#""error":"notSupported""#),
+            "{on_public}"
+        );
+        let path = r#"{"method":"ripple_path_find","params":[{"ledger_index":"current"}]}"#;
+        let (_, on_public) = post(public, path.to_owned()).await;
+        assert!(
+            on_public.contains(r#""error":"notSupported""#),
+            "{on_public}"
+        );
+        // On our own door it goes to the node, which is down here.
+        let (_, on_own) = post(own, submit.clone()).await;
+        assert!(on_own.contains(r#""error":"failedToForward""#), "{on_own}");
+        let secret = r#"{"method":"submit","params":[{"tx_blob":"00","secret":"s"}]}"#;
+        let (_, refused) = post(own, secret.to_owned()).await;
+        assert!(refused.contains("signingNotSupported"), "{refused}");
+        // Not turned on: as if the method didn't exist.
+        let (off, _) = apps(
+            Arc::new(test_engine(other.path())),
+            Some(forwarder),
+            metrics::Shared::default(),
+            ServeConfig::default(),
+            None,
+        );
+        let (_, unknown) = post(listen(off).await, submit).await;
+        assert!(unknown.contains(r#""error":"unknownCmd""#), "{unknown}");
+    }
+
+    #[tokio::test]
+    async fn the_public_door_caps_sessions_and_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ServeConfig {
+            public: Some(public_config()),
+            ..ServeConfig::default()
+        };
+        let (_, public) = apps(
+            Arc::new(test_engine(dir.path())),
+            None,
+            metrics::Shared::default(),
+            config,
+            None,
+        );
+        let addr = listen(public.unwrap()).await;
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        // The only session is taken.
+        assert!(
+            tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+                .await
+                .is_err()
+        );
+        let subscribe = serde_json::json!({
+            "command": "subscribe",
+            "accounts": ["rrrrrrrrrrrrrrrrrrrrrhoLvTp", "rrrrrrrrrrrrrrrrrrrrBZbvji"],
+        });
+        ws.send(Client::Text(subscribe.to_string().into()))
+            .await
+            .unwrap();
+        let Some(Ok(Client::Text(reply))) = ws.next().await else {
+            panic!("no reply");
+        };
+        assert!(reply.contains("accountsTooMany"), "{reply}");
+    }
+
+    #[test]
+    fn health_reports_a_server_that_stopped_advancing() {
+        use axum::http::StatusCode;
+        assert_eq!(health_answer(Some((5, 3))).0, StatusCode::OK);
+        assert_eq!(health_answer(Some((5, HEALTHY_AGE))).0, StatusCode::OK);
+        let (status, body) = health_answer(Some((5, HEALTHY_AGE + 1)));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "lagging");
+        assert_eq!(health_answer(None).0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_on_an_empty_server_is_503() {
+        let dir = tempfile::tempdir().unwrap();
+        let (own, _) = apps(
+            Arc::new(test_engine(dir.path())),
+            None,
+            metrics::Shared::default(),
+            ServeConfig::default(),
+            None,
+        );
+        let addr = listen(own).await;
+        let got = tokio::task::spawn_blocking(move || {
+            let agent: ureq::Agent = ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into();
+            let mut r = agent.get(&format!("http://{addr}/health")).call().unwrap();
+            (r.status().as_u16(), r.body_mut().read_to_string().unwrap())
+        })
+        .await
+        .unwrap();
+        assert_eq!(got.0, 503);
+        assert!(got.1.contains("noLedger"), "{}", got.1);
+    }
+
     fn test_engine(dir: &std::path::Path) -> Engine {
         Engine {
             state: Arc::new(crate::state::StateStore::open(&dir.join("state")).unwrap()),
@@ -719,13 +1186,18 @@ mod tests {
             sweep: std::time::Duration::from_secs(3600),
             ..GuardConfig::default()
         };
-        let routes = app(
+        let config = ServeConfig {
+            own_limits: guard,
+            ..ServeConfig::default()
+        };
+        let routes = apps(
             Arc::new(test_engine(dir.path())),
             None,
             metrics.clone(),
-            guard,
+            config,
             None,
         )
+        .0
         .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, routes).await });
         let got = tokio::task::spawn_blocking(move || {
@@ -814,13 +1286,14 @@ mod tests {
         let metrics = metrics::Shared::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let routes = app(
+        let routes = apps(
             Arc::new(engine),
             None,
             metrics.clone(),
-            GuardConfig::default(),
+            ServeConfig::default(),
             None,
         )
+        .0
         .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, routes).await });
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))

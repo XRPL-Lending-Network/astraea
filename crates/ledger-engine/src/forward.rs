@@ -3,7 +3,13 @@
 //! Nodes are tried round-robin, each with its own timeout; the node's
 //! response is returned as is and marked `forwarded`, as in Clio. Identical
 //! requests within `CACHE_FOR` get the same response; this is how Clio absorbs
-//! bursts of fee polling.
+//! bursts of fee polling. One request gets `TOTAL_LIMIT` over all nodes, and a
+//! node that just failed is tried last, so that one dead node doesn't cost half
+//! of the requests a timeout.
+//!
+//! `submit` and `simulate` go to a node only when the operator turned them on,
+//! never carry signing material, and `submit` is never cached or retried once
+//! it may have reached a node (`send_transaction`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -76,6 +82,46 @@ pub fn forwarded(method: &str, params: &Map<String, Value>) -> bool {
     matches!(method, "account_info" | "ledger") && params.get("queue") == Some(&Value::Bool(true))
 }
 
+/// Methods that send a transaction to a node or try one out.
+pub fn submission(method: &str) -> bool {
+    matches!(method, "submit" | "simulate")
+}
+
+fn invalid(message: &str) -> RpcError {
+    RpcError {
+        error: "invalidParams",
+        code: 31,
+        message: message.into(),
+    }
+}
+
+/// The parameters of `submit` or `simulate` that may reach the node. A request
+/// that would have the node sign is refused: a secret must not travel through
+/// this server, and a node that trusts us might act on it.
+pub fn submission_params(
+    method: &str,
+    params: &Map<String, Value>,
+) -> Result<Map<String, Value>, RpcError> {
+    for k in ["secret", "seed", "seed_hex", "passphrase", "key_type"] {
+        if params.contains_key(k) {
+            return Err(invalid("signingNotSupported"));
+        }
+    }
+    let keep: &[&str] = if method == "submit" {
+        if !params.get("tx_blob").is_some_and(Value::is_string) {
+            return Err(invalid("submit takes a signed tx_blob."));
+        }
+        &["tx_blob", "fail_hard", "api_version"]
+    } else {
+        &["tx_blob", "tx_json", "binary", "api_version"]
+    };
+    Ok(params
+        .iter()
+        .filter(|(k, _)| keep.contains(&k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect())
+}
+
 /// Node fields in `server_info`, as in Clio: the fee multiplier (clients such
 /// as xrpl.js compute fees from it; hundreds under escalation) and the xrpld version.
 /// `node` is the `result` of the node's `server_info` response.
@@ -102,9 +148,45 @@ const CACHE_MAX: usize = 64;
 /// a hung node must not hold request slots and slow down server_info.
 const DOWN_FOR: Duration = Duration::from_secs(5);
 
+/// How long one forwarded request may take over all nodes. Clients commonly give
+/// up after 10 seconds, and the answer is no use to them after that.
+const TOTAL_LIMIT: Duration = Duration::from_secs(8);
+/// How long a request may spend connecting. Past this nothing was sent, so
+/// another node can safely be asked.
+const CONNECT_LIMIT: Duration = Duration::from_secs(2);
+
 /// How old the node's server_info may be and still be merged into ours while
 /// a refresh runs; older than this (the node stopped answering), it is dropped.
 const INFO_KEEP: Duration = Duration::from_secs(10);
+
+/// Why a node gave no answer.
+#[derive(Debug)]
+struct AskError {
+    /// The request can't have reached the node.
+    nothing_sent: bool,
+    text: String,
+}
+
+impl AskError {
+    fn after_send(text: impl Into<String>) -> AskError {
+        AskError {
+            nothing_sent: false,
+            text: text.into(),
+        }
+    }
+}
+
+/// Whether a failed request can't have reached the node. Anything else, a reset
+/// connection or a timeout while waiting, may have delivered it.
+fn nothing_sent(e: &ureq::Error) -> bool {
+    use ureq::Timeout;
+    match e {
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Timeout(Timeout::Resolve | Timeout::Connect) => true,
+        ureq::Error::Io(e) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+        _ => false,
+    }
+}
 
 /// Method and params → when the node response was received, and the response.
 type Cache = HashMap<String, (Instant, Map<String, Value>)>;
@@ -114,6 +196,10 @@ pub struct Forwarder {
     /// Node JSON-RPC endpoints, e.g. `http://<node>:51234`.
     sources: Vec<String>,
     agent: ureq::Agent,
+    /// Timeout for each node.
+    timeout: Duration,
+    /// When each node last failed, in the order of `sources`.
+    failed_at: Mutex<Vec<Option<Instant>>>,
     next: AtomicUsize,
     cache: Mutex<Cache>,
     /// When all nodes last failed to respond.
@@ -126,7 +212,9 @@ pub struct Forwarder {
 impl Forwarder {
     pub fn new(sources: Vec<String>, timeout: Duration) -> Forwarder {
         Forwarder {
+            failed_at: Mutex::new(vec![None; sources.len()]),
             sources,
+            timeout,
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(timeout))
                 .user_agent(concat!("astraea/", env!("CARGO_PKG_VERSION")))
@@ -196,12 +284,15 @@ impl Forwarder {
             return Err(failed());
         }
         let body = json!({ "method": method, "params": [params] }).to_string();
-        let n = self.sources.len();
-        let start = self.next.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + TOTAL_LIMIT;
         let mut last = String::from("no nodes to forward to");
-        for k in 0..n {
-            let url = &self.sources[(start + k) % n];
-            match self.ask(url, &body) {
+        for i in self.order() {
+            let url = &self.sources[i];
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.ask(url, &body, self.timeout.min(left)) {
                 Ok(r) => {
                     let mut c = self.lock();
                     if c.len() >= CACHE_MAX {
@@ -211,9 +302,13 @@ impl Forwarder {
                         c.insert(key, (Instant::now(), r.clone()));
                     }
                     *self.down.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                    self.mark(i, None);
                     return Ok(r);
                 }
-                Err(e) => last = format!("{url}: {e}"),
+                Err(e) => {
+                    self.mark(i, Some(Instant::now()));
+                    last = format!("{url}: {}", e.text);
+                }
             }
         }
         tracing::warn!("forwarding {method} failed: {last}");
@@ -221,23 +316,92 @@ impl Forwarder {
         Err(failed())
     }
 
-    fn ask(&self, url: &str, body: &str) -> Result<Map<String, Value>, String> {
+    /// Sends a signed transaction to one node. Unlike `forward` this is never
+    /// cached: a retry has to reach the network. Another node is asked only when
+    /// the first can't have received it. Sending it again after a timeout could
+    /// give `tefPAST_SEQ` for a transaction that in fact went through, and the
+    /// client would take that for a failure; so it gets `failedToForward` and
+    /// must look the transaction up by hash.
+    pub fn send_transaction(
+        &self,
+        params: &Map<String, Value>,
+    ) -> Result<Map<String, Value>, RpcError> {
+        let body = json!({ "method": "submit", "params": [params] }).to_string();
+        let deadline = Instant::now() + TOTAL_LIMIT;
+        let mut last = String::from("no nodes to forward to");
+        for i in self.order() {
+            let url = &self.sources[i];
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match self.ask(url, &body, self.timeout.min(left)) {
+                Ok(r) => {
+                    self.mark(i, None);
+                    return Ok(r);
+                }
+                Err(e) => {
+                    self.mark(i, Some(Instant::now()));
+                    if !e.nothing_sent {
+                        tracing::warn!("submit to {url} has no answer: {}", e.text);
+                        return Err(RpcError {
+                            error: "failedToForward",
+                            code: 90,
+                            message: "No answer from the node; the transaction may have been \
+                                      sent. Look it up by hash before sending it again."
+                                .into(),
+                        });
+                    }
+                    last = format!("{url}: {}", e.text);
+                }
+            }
+        }
+        tracing::warn!("submit failed, nothing sent: {last}");
+        Err(RpcError {
+            error: "failedToForward",
+            code: 90,
+            message: "Failed to forward request to p2p node".into(),
+        })
+    }
+
+    /// Nodes to try, in turn, with those that just failed last.
+    fn order(&self) -> Vec<usize> {
+        let n = self.sources.len();
+        let start = self.next.fetch_add(1, Ordering::Relaxed);
+        let failed = self.failed_at.lock().unwrap_or_else(|p| p.into_inner());
+        let mut order: Vec<usize> = (0..n).map(|k| (start + k) % n).collect();
+        order.sort_by_key(|&i| failed[i].is_some_and(|t| t.elapsed() < DOWN_FOR));
+        order
+    }
+
+    fn mark(&self, node: usize, failed: Option<Instant>) {
+        self.failed_at.lock().unwrap_or_else(|p| p.into_inner())[node] = failed;
+    }
+
+    fn ask(&self, url: &str, body: &str, limit: Duration) -> Result<Map<String, Value>, AskError> {
         let mut resp = self
             .agent
             .post(url)
+            .config()
+            .timeout_global(Some(limit))
+            .timeout_connect(Some(CONNECT_LIMIT.min(limit)))
+            .build()
             .header("content-type", "application/json")
             .send(body)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AskError {
+                nothing_sent: nothing_sent(&e),
+                text: e.to_string(),
+            })?;
         let text = resp
             .body_mut()
             .read_to_string()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| AskError::after_send(e.to_string()))?;
         match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(mut o)) => match o.remove("result") {
                 Some(Value::Object(r)) => Ok(r),
-                _ => Err("no result in the response".into()),
+                _ => Err(AskError::after_send("no result in the response")),
             },
-            _ => Err("response is not JSON".into()),
+            _ => Err(AskError::after_send("response is not JSON")),
         }
     }
 
@@ -362,6 +526,118 @@ mod tests {
         }
         assert!(t.elapsed() < Duration::from_millis(50));
         assert!(f.info_refreshing.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_request_has_one_deadline_over_all_nodes() {
+        let hung = || slow_node(Duration::from_secs(60));
+        // Two nodes at 5 s each would take 10 s; the deadline ends it at 8.
+        let f = Forwarder::new(vec![hung(), hung()], Duration::from_secs(5));
+        let t = Instant::now();
+        assert!(f.forward("fee", &Map::new()).is_err());
+        let took = t.elapsed();
+        assert!(took >= TOTAL_LIMIT - Duration::from_millis(100), "{took:?}");
+        assert!(took < TOTAL_LIMIT + Duration::from_secs(1), "{took:?}");
+    }
+
+    #[test]
+    fn a_node_that_just_failed_is_tried_last() {
+        let f = Forwarder::new(
+            vec!["http://127.0.0.1:1".into(), "http://127.0.0.1:2".into()],
+            Duration::from_secs(1),
+        );
+        f.mark(0, Some(Instant::now()));
+        for _ in 0..4 {
+            assert_eq!(f.order(), vec![1, 0]);
+        }
+        // Once the mark is old, the nodes take turns again.
+        f.mark(0, Some(Instant::now() - DOWN_FOR));
+        let (a, b) = (f.order()[0], f.order()[0]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn signing_on_the_node_is_refused() {
+        let p = |v: Value| v.as_object().unwrap().clone();
+        for k in ["secret", "seed", "seed_hex", "passphrase", "key_type"] {
+            for m in ["submit", "simulate"] {
+                let e = submission_params(m, &p(json!({"tx_blob": "00", k: "x"}))).unwrap_err();
+                assert_eq!(e.error, "invalidParams");
+                assert_eq!(e.message, "signingNotSupported");
+            }
+        }
+        assert!(submission_params("submit", &p(json!({"tx_json": {}}))).is_err());
+        let kept = submission_params(
+            "submit",
+            &p(json!({"tx_blob": "00", "fail_hard": true, "admin": 1})),
+        )
+        .unwrap();
+        assert_eq!(kept, p(json!({"tx_blob": "00", "fail_hard": true})));
+        let kept = submission_params(
+            "simulate",
+            &p(json!({"tx_json": {"TransactionType": "Payment"}, "other": 1})),
+        )
+        .unwrap();
+        assert_eq!(kept, p(json!({"tx_json": {"TransactionType": "Payment"}})));
+    }
+
+    #[test]
+    fn a_transaction_goes_to_the_next_node_only_if_nothing_was_sent() {
+        let p = json!({"tx_blob": "00"}).as_object().unwrap().clone();
+        // The first node refuses the connection, so the second one gets it.
+        let (up, seen) = counting_node();
+        let f = Forwarder::new(
+            vec!["http://127.0.0.1:1".into(), up],
+            Duration::from_secs(2),
+        );
+        f.mark(1, Some(Instant::now()));
+        assert!(f.send_transaction(&p).is_ok());
+        assert_eq!(seen.load(Ordering::Relaxed), 1);
+
+        // A node that took it and went silent: no second attempt, and the client
+        // is told the outcome is unknown.
+        let (up, seen) = counting_node();
+        let hung = slow_node(Duration::from_secs(60));
+        let f = Forwarder::new(vec![hung, up], Duration::from_millis(300));
+        f.mark(1, Some(Instant::now()));
+        let e = f.send_transaction(&p).unwrap_err();
+        assert_eq!(e.error, "failedToForward");
+        assert!(e.message.contains("may have been sent"), "{}", e.message);
+        assert_eq!(seen.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_transaction_is_never_answered_from_the_cache() {
+        let (url, seen) = counting_node();
+        let f = Forwarder::new(vec![url], Duration::from_secs(2));
+        let p = json!({"tx_blob": "00"}).as_object().unwrap().clone();
+        f.send_transaction(&p).unwrap();
+        f.send_transaction(&p).unwrap();
+        assert_eq!(seen.load(Ordering::Relaxed), 2);
+    }
+
+    /// A node that answers at once and counts the requests it got.
+    fn counting_node() -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let seen = Arc::new(AtomicUsize::new(0));
+        let count = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let mut s = s.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                count.fetch_add(1, Ordering::Relaxed);
+                let body = r#"{"result":{"engine_result":"tesSUCCESS"}}"#;
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, seen)
     }
 
     #[test]

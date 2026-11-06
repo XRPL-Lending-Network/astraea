@@ -199,6 +199,11 @@ impl Hub {
         st
     }
 
+    /// Accounts a session is subscribed to now.
+    pub fn accounts_of(&self, id: u64) -> usize {
+        self.lock().get(&id).map_or(0, |s| s.accounts.len())
+    }
+
     /// `top` is the ledger the subscribe response will report.
     pub fn subscribe(&self, id: u64, r: &Request, api: u32, top: u32) {
         if let Some(s) = self.lock().get_mut(&id) {

@@ -80,7 +80,11 @@ When the server is started with `--forward-rpc`, these go to the node the way Cl
 - public read methods asked about the open ledger (`ledger_index` of `"current"` or `"closed"`): `account_info`, `account_lines`, `account_objects`, `account_offers`, `account_channels`, `account_currencies`, `account_nfts`, `amm_info`, `book_offers`, `book_changes`, `deposit_authorized`, `gateway_balances`, `ledger`, `ledger_data`, `ledger_entry`, `nft_buy_offers`, `nft_sell_offers`, `noripple_check`, `ripple_path_find`, `vault_info`;
 - `account_info` and `ledger` with `"queue": true`.
 
-Nothing else is forwarded, whatever its parameters say. Transaction submission and admin methods return `unknownCmd`. Forwarded answers carry `"forwarded": true`. If all nodes fail, the server answers `failedToForward` at once for the next 5 seconds instead of waiting on a dead node.
+Nothing else is forwarded, whatever its parameters say, and admin methods return `unknownCmd`. Forwarded answers carry `"forwarded": true`. A forwarded request has 8 seconds over all nodes, and a node that just failed is tried last. If all nodes fail, the server answers `failedToForward` at once for the next 5 seconds instead of waiting on a dead node.
+
+`submit` and `simulate` are forwarded only on a server started with `--forward-submissions`, and never on a public listener; otherwise they return `unknownCmd`, or `notSupported` on a public listener. The node never signs for a client: `submit` takes only a signed `tx_blob`, and a request with `secret`, `seed`, `seed_hex`, `passphrase` or `key_type` gets `invalidParams` with the message `signingNotSupported`.
+
+`submit` is not cached. Another node is tried only when the first can't have received the transaction, because sending it again could give `tefPAST_SEQ` for a transaction that in fact went through. A `failedToForward` whose message says the transaction may have been sent means the outcome is unknown: look it up by hash before sending it again.
 
 ### Subscriptions (WebSocket)
 
@@ -98,7 +102,11 @@ A server can limit each client's requests, response bytes and open connections, 
 
 HTTP answers carry `Cache-Control`: `public, max-age=86400, immutable` for answers that can never change (a transaction, anything about a ledger named by sequence or hash), `no-store` for the rest.
 
-Each request has 10 seconds. The loops whose length depends on the request (owner directory pages, `ledger_data` objects, cold index partitions, the transactions of a page or a ledger) check the time, and a request past it ends with `tooBusy` instead of holding one of the request slots. On real traffic requests take well under a second; the slowest, a full binary `ledger_data` page, about 0.7 s.
+Each request has 10 seconds, 5 on a public listener. The loops whose length depends on the request (owner directory pages, `ledger_data` objects, cold index partitions, the transactions of a page or a ledger) check the time, and a request past it ends with `tooBusy` instead of holding one of the request slots. On real traffic requests take well under a second; the slowest, a full binary `ledger_data` page, about 0.7 s. A request that waits for a slot longer than 5 seconds, 0.5 on a public listener, also ends with `tooBusy`.
+
+## Health
+
+`GET /health` answers 200 with `{"status": "ok", "ledger": <last ledger>, "age": <seconds since it closed>}` while the last ledger is at most 60 seconds old. Past that it answers 503 with `"status": "lagging"`, and with `"status": "noLedger"` when there is no ledger to serve yet.
 
 ## Proofs
 
