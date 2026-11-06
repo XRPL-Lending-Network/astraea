@@ -914,6 +914,9 @@ impl Engine {
             }
             Some(_) => return Err(invalid_params("Invalid parameters.")),
         };
+        if let Some(a) = after {
+            marker_in_range(a, range_max)?;
+        }
         // The next position after marker. There may be none if marker is right at
         // the edge: then the page is empty rather than starting over.
         let start = after.map(|a| after_marker(a, forward));
@@ -1174,6 +1177,18 @@ fn tx_index_of(meta: &[u8]) -> Option<u32> {
     stobject::find(&fs, FieldId::new(types::UINT32, 28)).and_then(stobject::u32_of)
 }
 
+/// A marker past our last ledger came from a server further ahead. Going
+/// forward there is nothing after it here, so the page would be empty with no
+/// marker, which reads as "no more transactions" although we just haven't got
+/// that far; going backward it would be ignored. Refused so that a client can't
+/// take either for a finished read.
+pub(crate) fn marker_in_range(marker: TxPosition, last: u32) -> Res<()> {
+    if marker.ledger > last {
+        return Err(invalid_params("markerOutOfRange"));
+    }
+    Ok(())
+}
+
 fn after_marker(a: TxPosition, forward: bool) -> Option<TxPosition> {
     if forward {
         match a.index.checked_add(1) {
@@ -1362,6 +1377,16 @@ mod tests {
         assert_eq!(tx_index_of(&other), full(&other));
         assert_eq!(tx_index_of(&other), None);
         assert_eq!(tx_index_of(&[0x20, 0x1C, 0]), None);
+    }
+
+    #[test]
+    fn marker_past_the_last_ledger_is_refused() {
+        let at = |ledger| TxPosition { ledger, index: 7 };
+        assert!(marker_in_range(at(99), 100).is_ok());
+        assert!(marker_in_range(at(100), 100).is_ok());
+        let e = marker_in_range(at(101), 100).unwrap_err();
+        assert_eq!((e.error, e.code), ("invalidParams", 31));
+        assert_eq!(e.message, "markerOutOfRange");
     }
 
     #[test]

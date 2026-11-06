@@ -313,6 +313,9 @@ impl Engine {
             Some(_) => return Err(invalid_params("invalidMarker")),
         };
         let (range_min, range_max) = self.range()?;
+        if let Some(m) = marker {
+            crate::api::marker_in_range(m, range_max)?;
+        }
         let (mut min, mut max) = (range_min, range_max);
         if let Some(lo) = lo {
             if lo > range_max || lo < range_min {

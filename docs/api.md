@@ -14,6 +14,10 @@ Every response carries a warning that Astraea serves validated data only:
 
 Ledgers outside the range get `lgrNotFound`, as on any server that doesn't have them. For `account_tx` with explicit bounds outside the range, version 2 returns `lgrIdxMalformed` like Clio.
 
+`account_tx` and `nft_history` refuse a marker past the last ledger with `invalidParams` and the message `markerOutOfRange`, on every API version. Such a marker comes from a server further ahead, for example after a client failed over to this one. An empty page without a marker would read as "no more transactions". This has not been compared with Clio.
+
+A successful `account_tx` covers only what `ledger_index_min` and `ledger_index_max` in the answer say. With `ledger_index_max` of -1, or on version 1 with a higher bound, that ends at this server's last ledger, which can be behind a live stream from another server. A client catching up must take its progress from `ledger_index_max` in the answer, not from the ledger it asked for or saw in the stream.
+
 ## Methods
 
 ### History
