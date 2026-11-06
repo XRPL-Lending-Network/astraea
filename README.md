@@ -94,6 +94,8 @@ On disk, the 5.18 billion transactions of the cold history take 1.08 TB: 1.03 TB
 
 ## License
 
-ISC, the same license as xrpld: see [LICENSE.md](LICENSE.md). The xrpld gRPC definitions in `crates/ledger-engine/proto` keep their own copy of the xrpld license.
+ISC: see [LICENSE.md](LICENSE.md). The gRPC definitions in `crates/ledger-engine/proto` come from xrpld and keep its license.
 
-To report a vulnerability, see [SECURITY.md](SECURITY.md). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+## Security and contributing
+
+Send vulnerabilities privately to **dev@xrpl-lending.network**, never to an issue or a pull request: see [SECURITY.md](SECURITY.md). Improvements are welcome as pull requests: see [CONTRIBUTING.md](CONTRIBUTING.md).

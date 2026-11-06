@@ -39,12 +39,15 @@ Released.
 - A fifth less code: the research code and finished benchmarks that production never used are gone, and the codec follows the same lint rules as everything else.
 - A comparison with Clio, including where Clio is ahead: [docs/compared-with-clio.md](docs/compared-with-clio.md).
 
-## Next: a public endpoint
+## 0.5: stable, open to everyone
+
+In progress. 0.5.0 is the first stable release and the point where Astraea opens to everyone. Smaller releases lead up to it.
 
 - Serving the public behind a tunnel that terminates TLS, with an edge cache keyed on the request body.
+- Reading deep pages of old history at least as fast as Clio.
+- Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
+- Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.
 
 ## Later
 
 - State at any historical ledger, not only from the snapshot onward.
-- Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
-- Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.

@@ -4,7 +4,9 @@ Astraea is general infrastructure for the XRP Ledger, and anyone who runs or use
 
 We assume you are familiar with the general practice of [making contributions on GitHub](https://docs.github.com/en/get-started/exploring-projects-on-github/contributing-to-a-project). This file covers only what is specific to this project.
 
-To report a vulnerability, do not open an issue: follow [SECURITY.md](SECURITY.md).
+Improvements and fixes for ordinary bugs are welcome as pull requests.
+
+Vulnerabilities are different. Send them privately to **dev@xrpl-lending.network**, and do not mention them in an issue, a pull request or a commit message, even when you already have the fix: follow [SECURITY.md](SECURITY.md).
 
 ## Before you start
 
@@ -87,4 +89,4 @@ For example: `feat: Add the validations stream`.
 
 # Maintainers
 
-Maintainers review and merge pull requests and cut releases. Reach them through issues on this repository, or at dev@xrpl-lending.network.
+Maintainers review and merge pull requests and cut releases. Reach them through issues on this repository, or at dev@xrpl-lending.network. Vulnerabilities go only to that address.
