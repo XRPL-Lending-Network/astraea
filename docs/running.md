@@ -85,7 +85,7 @@ Astraea serves at most 32 requests at once, 4 of them proofs, and gives each req
 
 ### Public access
 
-Serve strangers on their own address, `--public-api-addr`, and keep your own services on `--api-addr`. Limits per client alone don't protect your services: many addresses, each within its budget, can still fill every request slot. So the two doors don't share slots:
+Serve the public on its own address, `--public-api-addr`, and keep your own services on `--api-addr`. Limits per client alone don't protect your services: many addresses, each within its budget, can still fill every request slot. So the two doors don't share slots:
 
 | | `--api-addr` | `--public-api-addr` |
 |---|---|---|
@@ -140,7 +140,7 @@ A chunk of recent mainnet history (2 to 4 million transactions) takes 15 to 30 m
 
 - `astraea-client-replay.py` replays recorded client requests against both servers and compares the answers;
 - `astraea-cold-compare.py` samples ledgers, transactions and account history across a range;
-- `astraea-beta-compare.py`, `astraea-subs-compare.py`, `astraea-ws-compare.py` cover forwarding, `server_info` and subscriptions;
+- `astraea-forward-compare.py`, `astraea-subs-compare.py`, `astraea-ws-compare.py` cover forwarding, `server_info` and subscriptions;
 - `astraea-clio-bench.py` measures latency and throughput of both servers on the same requests;
 - `astraea-client-latency.py` does the same on a client's real requests from the Clio log, in their real mix.
 

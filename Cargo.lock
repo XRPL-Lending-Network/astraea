@@ -1035,7 +1035,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "ledger-engine"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "astraea-journal-codec",
  "axum",
@@ -2535,7 +2535,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "witness-archiver"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "witness-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "witness-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "hex",
  "serde",
@@ -2579,7 +2579,7 @@ dependencies = [
 
 [[package]]
 name = "witness-unl"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "witness-verify"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "clap",

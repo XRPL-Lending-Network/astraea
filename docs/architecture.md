@@ -1,8 +1,8 @@
 # Architecture
 
-Astraea has two halves that grew from one rule: never store or serve something you can't check.
+Astraea has two parts, and both follow one rule: store and serve only what has been checked.
 
-The Ledger Engine decides what the ledgers *contain*. The Proof Engine decides whether the network actually *agreed* on them. A ledger shows up in the API only when both are satisfied.
+The Ledger Engine decides what the ledgers contain. The Proof Engine decides whether the network agreed on them. A ledger shows up in the API only when both are satisfied.
 
 ![Architecture](../assets/architecture.svg)
 
@@ -63,7 +63,7 @@ The Proof Engine answers one question: did the network validate this ledger?
 - The ingest process subscribes to the validations stream of one or more nodes and checks each signature on arrival. Signing keys are mapped to master keys through manifests from the lists, or through a manifest fetched from a node when a validator rotated keys after the list was published.
 - `witness-archiver` stores the raw signed validations in sealed segments. Each closed segment gets a seal that includes the previous seal's hash, so dropping or swapping a segment in the middle is detectable.
 
-The quorum rule is the same everywhere in the codebase, from the loader to the offline verifier: at least 80% of the *full* UNL must have sent full validations for the ledger, the Negative UNL is not subtracted, and if more than one list could have been in force at the ledger's time, quorum has to hold for every combination. A source can delay or hide validations, and then a ledger simply stays unconfirmed. It can't forge them.
+The quorum rule is the same everywhere in the codebase, from the loader to the offline verifier: at least 80% of the *full* UNL must have sent full validations for the ledger, the Negative UNL is not subtracted, and if more than one list could have been in force at the ledger's time, quorum has to hold for every combination. A source can delay or hide validations, and then a ledger stays unconfirmed. It can't forge them.
 
 Confirming ledger `N` confirms every loaded ledger before it, because the loader already checked the parent-hash chain.
 

@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
+
+The first stable release. A public endpoint run by the maintainers will follow; until then the server is meant to be run by those who use it.
 
 - `--public-api-addr` adds public listeners with request slots of their own, so that public load can't fill the slots of `--api-addr`. They step aside with `tooBusy` when `--api-addr` runs low, require limits per client, and cap WebSocket sessions, subscribed accounts and request size. With a public listener the limits apply to it alone. See `docs/running.md`.
 - `submit` and `simulate` can be forwarded on `--api-addr` with `--forward-submissions`; they stay off by default and are never available on a public listener. Requests that would have the node sign are refused, `submit` is never cached, and it is sent to a second node only if the first can't have received it.
@@ -14,7 +16,7 @@
 
 ## 0.4.0
 
-- The research code that production never used is gone: experiments and measuring tools in the codec package, and finished benchmarks in the engine. That is 46,716 lines of Rust down to 37,092 and 25 binaries down to 7. No format or answer changes. Builds from before and after the cleanup read seven mainnet segments (2.42 million transactions) with identical digests, and rewrote each one byte for byte the same as the file on disk.
+- Research code that was never part of the server is gone: experiments and measuring tools in the codec package, and finished benchmarks in the engine. That is 46,716 lines of Rust down to 37,092 and 25 binaries down to 7. No format or answer changes. Builds from before and after the cleanup read seven mainnet segments (2.42 million transactions) with identical digests, and rewrote each one byte for byte the same as the file on disk.
 - The codec follows the workspace lints. Its 21 `unwrap` calls are gone, and a damaged block whose template points outside the pool now returns an error instead of panicking.
 - `write_atomic`, `now_ms` and the varint code each live in one place. The archiver's manifest write used a copy that did not sync the directory, so a crash could lose a manifest it had just replaced; it now syncs.
 - Updated axum to 0.8, tonic to 0.14, prost to 0.14 and tokio-tungstenite to 0.29. Together with the cleanup, `Cargo.lock` went from 282 packages to 277 and from 26 duplicated packages to 20. Unit tests pass; this was not yet run against a live node.
@@ -46,11 +48,11 @@
 - `account_tx` over cold history reads only headers and transactions, not state changes, and prepares the blocks a page needs in parallel. In the Clio comparison benchmark p99 for a 200-transaction page went from 4.2 s to 660 ms.
 - Cold segments carry a seal (`cold-F.seal`): each block gets its full check once, when the segment is written, instead of on every load. `astraea-state history-cold-seal` seals older segments. With it, account_tx p99 is 383 ms and 16 clients get 234 requests per second, up from 39.
 - `server_info` no longer waits for the node: the node's `load_factor` and version are refreshed in the background.
-- One byte budget for the whole cold block cache instead of a fixed share per segment, and `TransactionIndex` read straight from the metadata header. On a real client's traffic `account_tx` p99 went from 16.7 ms to 5.3 ms (Clio: 7.2 to 8.8 ms).
+- One byte budget for the whole cold block cache instead of a fixed share per segment, and `TransactionIndex` read straight from the metadata header. On mixed history and state requests `account_tx` p99 went from 16.7 ms to 5.3 ms (Clio: 7.2 to 8.8 ms).
 - Cold segments are written as ASTJ6: ASTJ5 blocks cut into parts of up to 1 MiB that decode on their own, each with its own dictionary and zstd frame. `account_tx` decodes one part per transaction instead of the whole block: a single cold transaction takes 2.0 ms instead of 7.0 on recent history. Archives grow by 8% on recent history and 17% around ledger 98 million. Seals cover a block's head and each part, so a read hashes only what it decodes. `astraea-state history-cold-recode` rewrites ASTJ5 segments in place while the server runs; with parts off, blocks are written byte for byte as before. On the Clio comparison range recoded to ASTJ6, account_tx p99 for a 200-transaction page went from 465 ms to 128 ms (Clio: 106 ms), and 16 clients get 433 requests per second instead of 298 (Clio: 453).
 - The XRPLA client retries dropped connections and 5xx answers with a growing pause.
 - The full-history loader locks each chunk, gives each process its own temporary archive, and refuses a chunk with fewer ledgers than asked.
-- WebSocket sessions answer a client's close frame before disconnecting. Without the reply xrpl.js saw an abnormal close and reconnected clients it had just disconnected, which then pinged forever: a few hundred idle sessions within the first quarter hour of real client traffic.
+- WebSocket sessions answer a client's close frame before disconnecting. Without the reply xrpl.js saw an abnormal close and reconnected clients it had just disconnected, which then pinged forever: a few hundred idle sessions within a quarter of an hour.
 - `--api-addr` takes several addresses. One that is busy is retried every 10 seconds, so Astraea takes over a port as soon as the server holding it stops.
 - API metrics on the metrics port: `astraea_api_requests_total` by transport, method and status (`success` or the error name), `astraea_api_request_duration_seconds` by method, and open WebSocket sessions.
 

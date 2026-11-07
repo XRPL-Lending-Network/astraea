@@ -4,19 +4,23 @@
 
 Astraea is a history server for the XRP Ledger. It speaks the same JSON-RPC and WebSocket API as [Clio](https://github.com/XRPLF/clio), so an existing client can point at it without changes. It stores the whole public history, back to ledger 32571, in a compact format of its own. It can also hand you a package of evidence for any ledger, transaction or state object, which you can check on your own machine without trusting Astraea or any node.
 
-The project is at version 0.4: it answers everything Clio answers, over the full history, and has the limits a public server needs. Its answers have been compared with Clio on recorded production traffic, request by request. Expect rough edges in the docs and tooling more than in the data path.
+Version 0.5 is the first stable release. Astraea answers everything Clio answers, over the full history.
+
+## Public endpoint
+
+A public endpoint run by the maintainers is coming soon, and its address will be published here. Until then, you can run a server of your own: see [docs/running.md](docs/running.md).
 
 ## Why another history server
 
-A Clio or rippled node answers questions about the ledger, and you take its word for it. That is fine most of the time. It stops being fine when the answer matters to someone who doesn't run the node, like an auditor or a lender checking that a repayment really landed.
+A Clio or rippled node answers questions about the ledger, and you take its word for it. That is usually enough, but not when the answer matters to someone who doesn't run the node, like an auditor or a lender checking that a repayment really landed.
 
-Astraea keeps the same answers but also keeps the reasons. Every ledger it stores has passed three checks before it is written:
+Astraea gives the same answers and also keeps the evidence for them. Every ledger it stores has passed three checks before it is written:
 
 - the transaction tree rebuilt from the stored transactions matches the root in the ledger header;
 - the header's parent hash matches the previous ledger;
 - validators from the UNL that was in force at the time signed that ledger, with at least 80% of the full list agreeing.
 
-The signatures and the UNL lists are archived next to the data, byte for byte as the network and the list publishers sent them. That is what lets Astraea build a proof later, and not only for the newest ledger.
+The signatures and the UNL lists are archived next to the data, byte for byte as the network and the list publishers sent them. From them Astraea can build a proof for an old ledger as well as for the newest one.
 
 ## How it fits together
 
@@ -40,7 +44,9 @@ Clio-compatible methods, answered from Astraea's own data:
 
 `server_info`, `ping`, `ledger`, `tx` (by hash or CTID), `account_tx`, `account_info`, `account_lines`, `account_objects`, `account_offers`, `ledger_entry`, `ledger_data`, `mpt_holders`, `account_nfts`, `nft_buy_offers`, `nft_sell_offers`, `nft_info`, `nft_history`, `nfts_by_issuer`, `book_changes`, and WebSocket `subscribe` for the `ledger`, `transactions`, `book_changes`, `validations` and `manifests` streams and for accounts.
 
-Methods that Clio forwards to a node (`fee`, `server_state`, `ledger_current`, `server_definitions`, and read-only queries against the open ledger) are forwarded the same way. Submitting transactions is not supported.
+Methods that Clio forwards to a node (`fee`, `server_state`, `ledger_current`, `server_definitions`, and read-only queries against the open ledger) are forwarded the same way. `submit` and `simulate` can be forwarded for your own services with `--forward-submissions`: they are off by default, never available on a public listener, and Astraea never signs on a client's behalf.
+
+`GET /health` answers 200 while the latest ledger is at most 60 seconds old, for a load balancer or a monitor.
 
 Proof methods: `proof_ledger`, `proof_tx` and `proof_entry` return an evidence package. The package format is described in [docs/evidence-format.md](docs/evidence-format.md), and `witness-verify evidence` checks one offline. `proof_ledger` and `proof_tx` cover all of history: an old ledger is reached through the skip lists the network keeps in its own state, which hold the hash of every 256th ledger since the start. `proof_entry` proves an object, or its absence, in the latest state or at any earlier ledger the server has state for.
 
@@ -84,7 +90,7 @@ Running a node of your own is covered in [docs/running.md](docs/running.md). The
 
 ## Status and plans
 
-Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs; 0.4 made the history smaller and took out the code production never used. What comes next is in [ROADMAP.md](ROADMAP.md).
+Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs; 0.4 made the history smaller and removed research code that was never part of the server; 0.5 added separate listeners for public clients and is the first stable release. What comes next is in [ROADMAP.md](ROADMAP.md).
 
 ### Full history
 

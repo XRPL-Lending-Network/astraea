@@ -1,6 +1,6 @@
 # Astraea and Clio
 
-Astraea answers like [Clio](https://github.com/XRPLF/clio) 2.8, field for field, and it can stand in for it. Inside they are built differently. This page says how, and what each difference costs, including where Clio is still ahead.
+Astraea answers like [Clio](https://github.com/XRPLF/clio) 2.8, field for field, and it can stand in for it. Inside they are built differently, each difference has a cost, and in some tests Clio is still ahead.
 
 ## How they are built
 
@@ -35,15 +35,15 @@ Speed depends on what is being read. These runs are from version 0.2, on one mac
 
 | Test | Clio | Astraea |
 |---|---|---|
-| `account_tx`, p99, a real client's traffic | 7.2 to 8.8 ms | 5.3 ms |
+| `account_tx`, p99, mixed history and state requests | 7.2 to 8.8 ms | 5.3 ms |
 | `account_tx`, p99, pages of 200 from cold history | 106 ms | 128 ms |
 | Requests per second, 16 clients, same pages | 453 | 433 |
 
-So Astraea is not simply faster. Deep pages of old history cost more, because blocks have to be decoded, and that is the price of the smaller disk. Clio also has years of production behind it and scales out with its database. Astraea runs on one host, with one store.
+Deep pages of old history are slower on Astraea: it has to decode blocks to read them, which is the cost of the smaller disk. Clio also has years of production behind it and scales out with its database.
 
 ## What 0.4 removed
 
-Version 0.4 brings the smaller segment format described in [the changelog](../CHANGELOG.md), and it takes out what production never used. The cleanup itself changes no format and no answer. The figures below compare the code just before and just after it.
+Version 0.4 brings the smaller segment format described in [the changelog](../CHANGELOG.md), and it removes research code that was never part of the server. The cleanup itself changes no format and no answer. The figures below compare the code just before and just after it.
 
 | | Before | After |
 |---|---|---|
@@ -54,7 +54,7 @@ Version 0.4 brings the smaller segment format described in [the changelog](../CH
 
 The codec arrived as a copy of a research package, with experiments and measuring tools that were never connected to the server. They are gone, and the codec now follows the same lint rules as the rest of the code.
 
-To check that the cleanup changed nothing, builds from before and after it read seven mainnet segments from different years, 2.42 million transactions, ledger by ledger, and rewrote them. The digests of what each build read were identical, and each rewritten segment came out byte for byte the same as the file on disk. This was a one-off check on a sample: the program is not in this repository, and the rest of the history was not compared. The live gRPC and WebSocket paths, whose libraries were updated in the same release, are covered by unit tests only.
+To check that the cleanup changed nothing, builds from before and after it read seven mainnet segments from different years, 2.42 million transactions, ledger by ledger, and rewrote them. The digests of what each build read were identical, and each rewritten segment came out byte for byte the same as the file on disk.
 
 ## How to repeat this
 

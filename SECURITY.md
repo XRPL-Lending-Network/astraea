@@ -1,4 +1,4 @@
-# Security Policy
+# Security policy
 
 ## Where to send what
 
@@ -10,11 +10,11 @@
 
 If you are not sure whether something is a vulnerability, send it by email.
 
-## Supported Versions
+## Supported versions
 
 We fix security issues in the latest release and on the `main` branch. Reports about older releases are welcome when the issue is still present in one of those two.
 
-## Identifying and Reporting Vulnerabilities
+## Identifying and reporting vulnerabilities
 
 Please report vulnerabilities privately, by email to **dev@xrpl-lending.network**. Include what you found, how to reproduce it, and what an attacker could do with it. We will confirm we received the report, keep you informed while we work on it, and credit you in the release notes unless you prefer not to be named.
 
@@ -27,7 +27,7 @@ Issues we especially want to hear about:
 - a request that crashes the server, takes it down for other clients, or makes it use memory or disk without bound;
 - a way to reach the node behind the server, or methods it must not forward, through Astraea.
 
-### Responsible Investigation
+### Responsible investigation
 
 We ask you to investigate carefully and to disclose responsibly. That includes, among other things:
 
@@ -35,7 +35,7 @@ We ask you to investigate carefully and to disclose responsibly. That includes, 
 - Not attacking physical security, not using social engineering, spam, or denial of service against other people's servers.
 - Making a reasonable, good faith effort not to disrupt or harm the operators and users of the XRP Ledger.
 
-## Bug Bounty Program
+## Bug bounty program
 
 There is no bug bounty program for Astraea at this time. Issues in xrpld itself, Clio and the XRPL client libraries belong to the [XRPL Foundation's program](https://github.com/XRPLF/rippled/blob/develop/SECURITY.md).
 

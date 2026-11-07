@@ -6,7 +6,7 @@ Astraea is general infrastructure for the XRP Ledger. It is not tied to any one 
 
 Released.
 
-- Clio-compatible JSON-RPC and WebSocket API for history and state, compared with Clio request by request on recorded production traffic.
+- Clio-compatible JSON-RPC and WebSocket API for history and state, compared with Clio request by request.
 - Ledgers loaded from xrpld and checked before writing: transaction root, parent chain, state root.
 - Confirmation by validator quorum from archived signatures and UNL lists, independent of the source node.
 - Evidence packages for ledgers, transactions and state objects, checkable offline with `witness-verify`.
@@ -36,18 +36,23 @@ Released.
 Released.
 
 - Smaller cold history: about 208 bytes per transaction with indexes across all of history, below the target of 217.
-- A fifth less code: the research code and finished benchmarks that production never used are gone, and the codec follows the same lint rules as everything else.
+- A fifth less code: research code and finished benchmarks that were never part of the server are gone, and the codec follows the same lint rules as everything else.
 - A comparison with Clio, including where Clio is ahead: [docs/compared-with-clio.md](docs/compared-with-clio.md).
 
-## 0.5: stable, open to everyone
+## 0.5: stable
 
-In progress. 0.5.0 is the first stable release and the point where Astraea opens to everyone. Smaller releases lead up to it.
+Released. The first stable release, and the point where the repository opens to everyone.
 
-- Serving the public behind a tunnel that terminates TLS, with an edge cache keyed on the request body.
+- Public listeners with request slots and limits of their own, so that public load can't take the slots your own services need.
+- `submit` and `simulate` forwarded for your own services, off by default and never on a public listener.
+- Forwarding with one deadline over all nodes, and a `server_info` that no longer waits for nodes that stopped answering.
+- `GET /health` for load balancers and monitors.
+- Repeated `account_tx` pages that no longer evict their own blocks, and markers past the last ledger refused instead of read as the end of history.
+
+## Next
+
+- A public endpoint behind a tunnel that terminates TLS, with an edge cache keyed on the request body.
+- State at any historical ledger, not only from the snapshot onward. In progress: the state patches of the cold history are being checked against every ledger's state root.
 - Reading deep pages of old history at least as fast as Clio.
 - Public benchmarks against Clio and the XRPLA archive: disk, memory, latency.
 - Packaging: container images, a systemd example, and a release pipeline with reproducible binaries.
-
-## Later
-
-- State at any historical ledger, not only from the snapshot onward.

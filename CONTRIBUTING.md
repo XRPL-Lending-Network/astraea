@@ -48,7 +48,7 @@ Please write tests for your code. Tests that run offline and finish in seconds b
 
 Rules that the code follows, and that review will ask for:
 
-- No `unsafe`: the workspace forbids it. If something truly needs it, lift the ban for that one module, with a comment saying why.
+- No `unsafe`: the workspace forbids it. If something needs it, lift the ban for that one module, with a comment saying why.
 - No `unwrap` or `expect` outside tests. Astraea parses data it does not control, and a panic there is a denial of service.
 - Data from a node or an archive is checked before it is written: the transaction tree against the header, the state tree against the header, the header against validator quorum. Don't add a path that skips this.
 - A loop whose length depends on the request checks the request's time limit (`limits::check`).

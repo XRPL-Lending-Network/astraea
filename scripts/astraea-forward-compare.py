@@ -1,8 +1,8 @@
-"""Compares closed beta methods with Clio. Forwarding to a node (fee,
-server_state, ledger_current, server_definitions): response shape and the
-forwarded flag; server_info: fields that mean the same on both; mpt_holders:
+"""Compares forwarded methods, server_info and mpt_holders with Clio.
+Forwarding to a node (fee, server_state, ledger_current, server_definitions):
+response shape and the forwarded flag; server_info: fields that mean the same on both; mpt_holders:
 the whole response on one ledger, including errors. Run on the host:
-python3 -I scripts/astraea-beta-compare.py (Clio on 51233, Astraea on 51300).
+python3 -I scripts/astraea-forward-compare.py (Clio on 51233, Astraea on 51300).
 """
 import json, sys, urllib.request, time
 CLIO, AST = "http://127.0.0.1:51233", "http://127.0.0.1:51300"
