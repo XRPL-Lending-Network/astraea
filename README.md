@@ -98,6 +98,10 @@ The whole public history is loaded, from ledger 32571 (1 January 2013) to the cu
 
 On disk, the 5.18 billion transactions of the cold history take 1.08 TB: 1.03 TB of cold segments, about 199 bytes per transaction, and 44 GB of indexes, about 9 bytes per transaction. That is 208 bytes per transaction in total, measured in November 2026 after the whole history was rewritten in the `astraea-cold/2` format. The load itself ended at 251 bytes per transaction. The cost of the segments depends on the era: about 158 bytes per transaction for ledgers 30 to 60 million, 229 for ledgers 60 to 85 million, and 205 from ledger 85 million on.
 
+## Acknowledgements
+
+Thanks to [XRPL Lending Network](https://github.com/XRPLLendingNet) for the documentation and for their help in getting Astraea to its first stable release.
+
 ## License
 
 ISC: see [LICENSE.md](LICENSE.md). The gRPC definitions in `crates/ledger-engine/proto` come from xrpld and keep its license.
