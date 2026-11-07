@@ -102,7 +102,7 @@ A server can limit each client's requests, response bytes and open connections, 
 
 HTTP answers carry `Cache-Control`: `public, max-age=86400, immutable` for answers that can never change (a transaction, anything about a ledger named by sequence or hash), `no-store` for the rest.
 
-Each request has 10 seconds, 5 on a public listener. The loops whose length depends on the request (owner directory pages, `ledger_data` objects, cold index partitions, the transactions of a page or a ledger) check the time, and a request past it ends with `tooBusy` instead of holding one of the request slots. On real traffic requests take well under a second; the slowest, a full binary `ledger_data` page, about 0.7 s. A request that waits for a slot longer than 5 seconds, 0.5 on a public listener, also ends with `tooBusy`.
+Each request has 10 seconds, 5 on a public listener. The loops whose length depends on the request (owner directory pages, `ledger_data` objects, cold index partitions, the transactions of a page or a ledger) check the time, and a request past it ends with `tooBusy` instead of holding one of the request slots. Most requests take well under a second; the slowest, a full binary `ledger_data` page, about 0.7 s. A request that waits for a slot longer than 5 seconds, 0.5 on a public listener, also ends with `tooBusy`.
 
 ## Health
 
