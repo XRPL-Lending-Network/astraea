@@ -109,7 +109,7 @@ def hero():
         stat_svg.append(f'<text x="{x}" y="420" class="sans" font-size="13" fill="{MUTED}">{label}</text>'
                         f'<text x="{x}" y="446" class="sans" font-size="20" fill="{INK}">{value}</text>')
 
-    chips = ["Written in Rust", "Clio 2.8 API", "Proofs you check offline", "ISC licensed"]
+    chips = ["Written in Rust", "Clio-compatible API", "Proofs you check offline", "ISC licensed"]
     chip_svg, x = [], 64
     for c in chips:
         w = 18 + len(c) * 6.9
@@ -119,7 +119,7 @@ def hero():
 
     mark, mark_w = wordmark(64, 70, slant=9)
     return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-labelledby="t d">
-  <title id="t">Astraea by Lending Network</title>
+  <title id="t">Astraea by XRPL Lending Network</title>
   <desc id="d">XRPL history you can check yourself. A sphere holds the history: lines of ledger hashes scroll inside it.</desc>
   <style>{STYLE_BASE}
     .hash {{ font-size: 11px; letter-spacing: 1.2px; fill: {SAGE}; }}
@@ -154,7 +154,7 @@ def hero():
   <circle cx="{cx}" cy="{cy}" r="{R}" fill="none" stroke="url(#rim)" stroke-width="1.2"/>
 
   {mark}
-  <text x="{f(64 + mark_w)}" y="128" text-anchor="end" class="sans" font-size="14" fill="{MUTED}">by Lending Network</text>
+  <text x="{f(64 + mark_w)}" y="128" text-anchor="end" class="sans" font-size="14" fill="{MUTED}">by XRPL Lending Network</text>
 
   <text x="62" y="222" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">XRPL history</text>
   <text x="62" y="282" class="serif" font-size="54" fill="{INK}" letter-spacing="-.5">you can check yourself</text>
