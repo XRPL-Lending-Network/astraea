@@ -451,17 +451,47 @@ mod tests {
         assert_eq!(r["info"]["complete_ledgers"], json!("1-2"));
     }
 
+    /// Reads one whole HTTP request, headers and body. A test node must not
+    /// answer before the body is in: headers and body can arrive apart, and a
+    /// socket closed with unread data resets the connection under the client,
+    /// which then can't tell whether the node got the request.
+    fn read_request(s: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = s.read(&mut buf).unwrap_or(0);
+            got.extend_from_slice(&buf[..n]);
+            if let Some(end) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&got[..end]);
+                let len = head
+                    .lines()
+                    .find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        k.eq_ignore_ascii_case("content-length")
+                            .then(|| v.trim().parse::<usize>().ok())?
+                    })
+                    .unwrap_or(0);
+                if got.len() >= end + 4 + len {
+                    return;
+                }
+            }
+            if n == 0 {
+                return;
+            }
+        }
+    }
+
     /// A node that answers server_info after `delay`, with a load factor
     /// counting its answers.
     fn slow_node(delay: Duration) -> String {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         std::thread::spawn(move || {
             for (n, s) in l.incoming().enumerate() {
                 let mut s = s.unwrap();
-                let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf);
+                read_request(&mut s);
                 std::thread::sleep(delay);
                 let body = json!({"result": {"info": {"load_factor": n + 1}}}).to_string();
                 let _ = write!(
@@ -618,7 +648,7 @@ mod tests {
 
     /// A node that answers at once and counts the requests it got.
     fn counting_node() -> (String, Arc<AtomicUsize>) {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", l.local_addr().unwrap());
         let seen = Arc::new(AtomicUsize::new(0));
@@ -626,8 +656,7 @@ mod tests {
         std::thread::spawn(move || {
             for s in l.incoming() {
                 let mut s = s.unwrap();
-                let mut buf = [0u8; 4096];
-                let _ = s.read(&mut buf);
+                read_request(&mut s);
                 count.fetch_add(1, Ordering::Relaxed);
                 let body = r#"{"result":{"engine_result":"tesSUCCESS"}}"#;
                 let _ = write!(
