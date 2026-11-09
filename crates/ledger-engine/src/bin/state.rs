@@ -206,6 +206,33 @@ enum Command {
         #[arg(long, value_delimiter = ',', default_value = "1,8")]
         threads: Vec<usize>,
     },
+    /// Measure how cold reads behave under concurrency: one "own" thread reads
+    /// random ledgers from the newest `--own-span` ledgers of the range while
+    /// "public" threads read random ledgers from the whole range. For every
+    /// combination of open-segment limit, cache budget and public thread
+    /// count, prints the own thread's latencies and both read rates. Reads
+    /// only; each combination starts with a fresh, empty cache.
+    HistoryColdContention {
+        #[arg(long)]
+        cold: PathBuf,
+        #[arg(long)]
+        from: u32,
+        #[arg(long)]
+        to: u32,
+        #[arg(long, default_value_t = 20_000)]
+        own_span: u32,
+        #[arg(long, value_delimiter = ',', default_value = "0,16")]
+        public_threads: Vec<usize>,
+        #[arg(long, value_delimiter = ',', default_value = "64")]
+        open_limits: Vec<usize>,
+        #[arg(long, value_delimiter = ',', default_value = "4096")]
+        cache_mibs: Vec<usize>,
+        /// Give the own thread a cache of its own.
+        #[arg(long)]
+        separate_own_cache: bool,
+        #[arg(long, default_value_t = 20)]
+        secs: u64,
+    },
     /// Measure an index of object versions over a window of cold history:
     /// its size, and reads of old objects through it. Writes nothing to the
     /// store. Prints one JSON line. `--db` is not used.
@@ -1149,6 +1176,118 @@ fn main() -> Result<(), String> {
                         "ledgers_per_second": (ledgers.len() as f64 / s).round(),
                     })
                 );
+            }
+        }
+        Command::HistoryColdContention {
+            cold,
+            from,
+            to,
+            own_span,
+            public_threads,
+            open_limits,
+            cache_mibs,
+            secs,
+            separate_own_cache,
+        } => {
+            use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+            if from >= to || own_span == 0 || own_span > to - from {
+                return Err("need from < to and 0 < own-span <= to - from".into());
+            }
+            let pct = |v: &mut Vec<f64>, q: f64| -> f64 {
+                v.sort_unstable_by(f64::total_cmp);
+                v.get(((v.len() as f64 * q) as usize).min(v.len().saturating_sub(1)))
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            let next = |x: &mut u64| {
+                *x ^= *x << 13;
+                *x ^= *x >> 7;
+                *x ^= *x << 17;
+                *x
+            };
+            for &open in &open_limits {
+                for &mib in &cache_mibs {
+                    for &n in &public_threads {
+                        let c = ledger_engine::cold::Cold::open(&cold)?
+                            .with_open_limit(open)
+                            .with_cache_budget(mib << 20);
+                        // With --separate-own-cache the own thread reads through a
+                        // cache of its own, to tell cache eviction from other contention.
+                        let split = if separate_own_cache {
+                            Some(
+                                ledger_engine::cold::Cold::open(&cold)?
+                                    .with_open_limit(open)
+                                    .with_cache_budget(mib << 20),
+                            )
+                        } else {
+                            None
+                        };
+                        let oc = split.as_ref().unwrap_or(&c);
+                        let stop = AtomicBool::new(false);
+                        let public_reads = AtomicU64::new(0);
+                        let errors = AtomicU64::new(0);
+                        let own_from = to - own_span;
+                        let started = Instant::now();
+                        let (mut own, max_open) = std::thread::scope(|s| {
+                            for k in 0..n {
+                                let (c, stop, public_reads, errors) =
+                                    (&c, &stop, &public_reads, &errors);
+                                s.spawn(move || {
+                                    let mut x = 0x9E37_79B9_7F4A_7C15 ^ (k as u64 + 1);
+                                    while !stop.load(Relaxed) {
+                                        let seq =
+                                            from + (next(&mut x) % u64::from(to - from)) as u32;
+                                        match c.ledger(seq, false) {
+                                            Ok(Some(_)) => public_reads.fetch_add(1, Relaxed),
+                                            _ => errors.fetch_add(1, Relaxed),
+                                        };
+                                    }
+                                });
+                            }
+                            let own = s.spawn(|| {
+                                let mut x = 0xD1B5_4A32_D192_ED03u64;
+                                let mut lat = Vec::new();
+                                let mut max_open = 0;
+                                while !stop.load(Relaxed) {
+                                    let seq =
+                                        own_from + (next(&mut x) % u64::from(own_span)) as u32;
+                                    let t = Instant::now();
+                                    match oc.ledger(seq, false) {
+                                        Ok(Some(_)) => lat.push(t.elapsed().as_secs_f64() * 1e3),
+                                        _ => {
+                                            errors.fetch_add(1, Relaxed);
+                                        }
+                                    }
+                                    max_open = max_open.max(
+                                        c.open_count()
+                                            + oc.open_count() * usize::from(!std::ptr::eq(oc, &c)),
+                                    );
+                                }
+                                (lat, max_open)
+                            });
+                            std::thread::sleep(std::time::Duration::from_secs(secs));
+                            stop.store(true, Relaxed);
+                            own.join().unwrap_or_default()
+                        });
+                        let took = started.elapsed().as_secs_f64();
+                        let reads = own.len();
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "open_limit": open,
+                                "cache_mib": mib,
+                                "public_threads": n,
+                                "seconds": took.round(),
+                                "own_reads_per_s": (reads as f64 / took).round(),
+                                "own_p50_ms": pct(&mut own, 0.5),
+                                "own_p99_ms": pct(&mut own, 0.99),
+                                "public_reads_per_s": (public_reads.load(Relaxed) as f64 / took).round(),
+                                "errors": errors.load(Relaxed),
+                                "max_open_segments": max_open,
+                            })
+                        );
+                    }
+                }
             }
         }
         Command::HistoryVersionsMeasure {
