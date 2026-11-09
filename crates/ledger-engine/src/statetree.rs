@@ -196,6 +196,11 @@ impl SubTree {
         self.leaves.len()
     }
 
+    /// Keys and leaf hashes, in key order.
+    pub(crate) fn leaves(&self) -> impl Iterator<Item = (&Hash, &Hash)> {
+        self.leaves.iter()
+    }
+
     /// Hash of the subtree by the tree rule: zeros if empty, the leaf if
     /// alone, else an inner node.
     pub(crate) fn hash(&mut self) -> Hash {

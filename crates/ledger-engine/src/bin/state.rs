@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -154,6 +154,83 @@ enum Command {
         dir: PathBuf,
         #[arg(long, default_value_t = 2000)]
         samples: usize,
+    },
+    /// Replay the state patches of cold history from a snapshot of the state
+    /// at the ledger before `--cold` starts, checking the root against
+    /// AccountHash on every ledger. Writes nothing but checkpoints. Stops at
+    /// the first ledger that differs and exits with an error. `--db` is not
+    /// used. With `--checkpoint-dir` it starts from the latest checkpoint
+    /// there, if there is one.
+    HistoryStateReplay {
+        #[arg(long)]
+        cold: PathBuf,
+        /// XWLS snapshot of the base ledger.
+        #[arg(long)]
+        base: PathBuf,
+        /// Threads that hash changed parts of the tree.
+        #[arg(long, default_value_t = 8)]
+        threads: usize,
+        /// Threads that read patches ahead.
+        #[arg(long, default_value_t = 2)]
+        readers: usize,
+        /// Directory for checkpoints; the replay resumes from the latest.
+        #[arg(long)]
+        checkpoint_dir: Option<PathBuf>,
+        /// Ledgers between checkpoints.
+        #[arg(long, default_value_t = 1_000_000)]
+        checkpoint_every: u32,
+        /// Last ledger to replay; by default the last in the cold history.
+        #[arg(long)]
+        to: Option<u32>,
+        /// Print progress every this many ledgers.
+        #[arg(long, default_value_t = 100_000)]
+        every: u32,
+        /// Budget of the decoded block cache, in MiB.
+        #[arg(long, default_value_t = 1024)]
+        cache_mib: usize,
+    },
+    /// Measure what hashing costs in a replay: apply the patches of
+    /// `--from..=--to` to the state of `--base`, ledger by ledger, and time the
+    /// roots for each thread count. The roots are not checked, so the base
+    /// need not be the ledger before `--from`. Writes nothing.
+    HistoryStateReplayBench {
+        #[arg(long)]
+        cold: PathBuf,
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long)]
+        from: u32,
+        #[arg(long)]
+        to: u32,
+        /// Thread counts to compare, comma separated.
+        #[arg(long, value_delimiter = ',', default_value = "1,8")]
+        threads: Vec<usize>,
+    },
+    /// Measure an index of object versions over a window of cold history:
+    /// its size, and reads of old objects through it. Writes nothing to the
+    /// store. Prints one JSON line. `--db` is not used.
+    HistoryVersionsMeasure {
+        #[arg(long)]
+        cold: PathBuf,
+        #[arg(long)]
+        from: u32,
+        #[arg(long)]
+        to: u32,
+        /// Ledgers read at random before the pass.
+        #[arg(long, default_value_t = 2000)]
+        random_reads: usize,
+        /// Objects read through the index after the pass.
+        #[arg(long, default_value_t = 2000)]
+        lookups: usize,
+        /// Size of the partitions whose cost is reported, in ledgers.
+        #[arg(long, default_value_t = 1_000_000)]
+        partition: u32,
+        /// Budget of the decoded block cache, in MiB.
+        #[arg(long, default_value_t = 256)]
+        cache_mib: usize,
+        /// Write the objects read as JSON lines here, to compare with a server.
+        #[arg(long)]
+        samples_out: Option<PathBuf>,
     },
     /// Cold history adjoins hot history: the last cold ledger is the
     /// parent of the first hot one.
@@ -931,6 +1008,192 @@ fn main() -> Result<(), String> {
                 accounts.len(),
                 t.elapsed().as_secs_f64()
             );
+        }
+        Command::HistoryStateReplay {
+            cold,
+            base,
+            threads,
+            readers,
+            checkpoint_dir,
+            checkpoint_every,
+            to,
+            every,
+            cache_mib,
+        } => {
+            use ledger_engine::coldreplay::{self as cr, Progress, StateTree};
+            let c = ledger_engine::cold::Cold::open(&cold)?.with_cache_budget(cache_mib << 20);
+            let to = match to {
+                Some(t) => t,
+                None => c.last().ok_or("no cold segments")?,
+            };
+            let mut tree = StateTree::with_threads(threads);
+            let resume = match &checkpoint_dir {
+                Some(d) => cr::latest(d)?,
+                None => None,
+            };
+            let (header, before) = match resume {
+                Some(path) => {
+                    let (header, before) = cr::load(&path, &mut tree)?;
+                    // The checkpoint's header must be the one the cold history
+                    // holds; replay then requires its root.
+                    if c.header(before.ledger)?.as_deref() != Some(&header[..]) {
+                        return Err(format!(
+                            "{}: header differs from ledger {} in the cold history",
+                            path.display(),
+                            before.ledger
+                        ));
+                    }
+                    println!(
+                        "resumed from {}: ledger {}, {} objects, loaded in {:.1} s",
+                        path.display(),
+                        before.ledger,
+                        tree.objects(),
+                        t.elapsed().as_secs_f64()
+                    );
+                    (header, before)
+                }
+                None => {
+                    let (header, objects) = snapshot(&base)?;
+                    for item in objects {
+                        let (key, data) = item?;
+                        tree.set(key, &data);
+                    }
+                    println!(
+                        "base: {} objects, loaded in {:.1} s",
+                        tree.objects(),
+                        t.elapsed().as_secs_f64()
+                    );
+                    (header, Progress::default())
+                }
+            };
+            let opts = cr::Options {
+                every,
+                readers,
+                checkpoint: checkpoint_dir.map(|d| (d, checkpoint_every)),
+            };
+            let line = |p: &Progress| {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ledger": p.ledger,
+                        "seconds": t.elapsed().as_secs_f64().round(),
+                        "versions": p.versions,
+                        "bytes": p.bytes,
+                        "objects": p.objects,
+                    })
+                );
+            };
+            match cr::replay(&c, &mut tree, &header, before, to, &opts, line) {
+                Ok(p) => {
+                    line(&p);
+                    println!("every root matches AccountHash up to ledger {}", p.ledger);
+                }
+                Err((p, e)) => {
+                    line(&p);
+                    return Err(e);
+                }
+            }
+        }
+        Command::HistoryStateReplayBench {
+            cold,
+            base,
+            from,
+            to,
+            threads,
+        } => {
+            use ledger_engine::statetree::state_leaf_hash_of;
+            let c = ledger_engine::cold::Cold::open(&cold)?;
+            let read = Instant::now();
+            let mut ledgers = Vec::with_capacity((to.saturating_sub(from) + 1) as usize);
+            let mut versions = 0u64;
+            for seq in from..=to {
+                let (_, patches) = c
+                    .patches(seq)?
+                    .ok_or(format!("ledger {seq} is not in the cold history"))?;
+                versions += patches.len() as u64;
+                ledgers.push(
+                    patches
+                        .iter()
+                        .map(|(k, d)| (*k, state_leaf_hash_of(d, k)))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            println!(
+                "{} ledgers, {versions} versions read and leaves hashed in {:.1} s",
+                ledgers.len(),
+                read.elapsed().as_secs_f64()
+            );
+            for n in threads {
+                let mut tree = ledger_engine::coldreplay::StateTree::with_threads(n);
+                let (_, objects) = snapshot(&base)?;
+                for item in objects {
+                    let (key, data) = item?;
+                    tree.set(key, &data);
+                }
+                tree.root();
+                let start = Instant::now();
+                for changes in &ledgers {
+                    for (k, leaf) in changes {
+                        tree.set_leaf(*k, *leaf);
+                    }
+                    tree.root();
+                }
+                let s = start.elapsed().as_secs_f64();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "threads": n,
+                        "objects": tree.objects(),
+                        "seconds": s,
+                        "versions_per_second": (versions as f64 / s).round(),
+                        "ledgers_per_second": (ledgers.len() as f64 / s).round(),
+                    })
+                );
+            }
+        }
+        Command::HistoryVersionsMeasure {
+            cold,
+            from,
+            to,
+            random_reads,
+            lookups,
+            partition,
+            cache_mib,
+            samples_out,
+        } => {
+            let c = ledger_engine::cold::Cold::open(&cold)?.with_cache_budget(cache_mib << 20);
+            let mut out = match samples_out {
+                Some(p) => Some(BufWriter::new(File::create(p).map_err(|e| e.to_string())?)),
+                None => None,
+            };
+            let window = ledger_engine::coldversions::Window {
+                from,
+                to,
+                random_reads,
+                lookups,
+                partition,
+            };
+            let mut failed = None;
+            let result = ledger_engine::coldversions::measure(&c, window, |key, at, seq, data| {
+                if let Some(w) = out.as_mut() {
+                    let line = serde_json::json!({
+                        "key": hex::encode_upper(key),
+                        "at": at,
+                        "seq": seq,
+                        "data": hex::encode_upper(data),
+                    });
+                    if let Err(e) = writeln!(w, "{line}") {
+                        failed = Some(e.to_string());
+                    }
+                }
+            })?;
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            if let Some(mut w) = out {
+                w.flush().map_err(|e| e.to_string())?;
+            }
+            println!("{result}");
         }
         Command::HistoryAnchor { cold, history } => {
             let c = ledger_engine::cold::Cold::open(&cold)?;

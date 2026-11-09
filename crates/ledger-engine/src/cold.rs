@@ -842,6 +842,9 @@ impl ColdSegment {
     }
 }
 
+/// A ledger's header and its state patches: key and object, empty if deleted.
+pub type LedgerPatches = (Vec<u8>, Vec<([u8; 32], Vec<u8>)>);
+
 /// Cold segments of a directory, with a budget for open ones.
 #[derive(Debug)]
 pub struct Cold {
@@ -928,6 +931,25 @@ impl Cold {
         self.segments[i].check(seq, with_changes)?;
         let (seg, o) = self.open_segment(i)?;
         seg.read(&o, seq, with_changes).map(Some)
+    }
+
+    /// Header and state patches of a cold ledger, without transactions or
+    /// change kinds; `None` if it is not here. A patch with empty data deletes
+    /// the object. A source without kinds has these too, but nothing has checked
+    /// them against `AccountHash`: that is for the caller (`coldreplay`).
+    pub fn patches(&self, seq: u32) -> Res<Option<LedgerPatches>> {
+        let Some(i) = self.find(seq) else {
+            return Ok(None);
+        };
+        let (seg, o) = self.open_segment(i)?;
+        let row = seg.whole_row(&o, seq)?;
+        if row.seq != seq {
+            return Err(corrupt(format!(
+                "at position {seq} found ledger {}",
+                row.seq
+            )));
+        }
+        Ok(Some((row.header, row.patches)))
     }
 
     /// Header of a cold ledger alone; `None` if it is not here.

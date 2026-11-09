@@ -40,6 +40,8 @@ pub mod bookchanges;
 pub mod cold;
 pub mod coldindex;
 pub mod coldpatch;
+pub mod coldreplay;
+pub mod coldversions;
 pub mod confirm;
 pub mod delta;
 pub mod forward;
