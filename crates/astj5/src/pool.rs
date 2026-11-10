@@ -20,10 +20,37 @@
 //! checked in full as before. A JC06 block has a digest of its head (sizes and
 //! shared section) and one per part: a read checks the head and the parts it
 //! compiles, not the whole block.
+//!
+//! A block evicted from the cache and read again is prepared again, and its
+//! parts compile again. What the first preparation established is not
+//! repeated: the pool remembers, for every seal digest, that the stored bytes
+//! matched it once in this process, and for sealed JC06 blocks the hashes of
+//! their transactions (at most `MEMO_BYTES` of them, least recently prepared
+//! blocks dropped first). So a head or part is hashed against its digest the
+//! first time it is used and trusted after that for as long as the pool is
+//! open; a part that does not match is refused every time, since only a match
+//! is remembered. The archive file is expected not to change under an open
+//! pool: a segment is rewritten through a new file, not in place.
 use super::*;
 use sha2::{Digest, Sha512};
+use std::collections::HashMap;
 use std::os::unix::fs::FileExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
+/// Most bytes of remembered transaction hashes per pool. A 4 MiB block holds
+/// some thousands of transactions, a few hundred KB of hashes, against tens
+/// of MB for the prepared block.
+const MEMO_BYTES: usize = 8 << 20;
+/// Remembered transaction hashes per block: hashes, last use, and the tick.
+#[derive(Default)]
+struct Memos {
+    blocks: HashMap<usize, (fast::TxMemo, u64)>,
+    tick: u64,
+    bytes: usize,
+}
+fn memo_bytes(m: &fast::TxMemo) -> usize {
+    m.len() * std::mem::size_of::<OnceLock<[u8; 32]>>()
+}
 enum Data {
     Prepared(Box<fast::Prepared>),
     Rows(Vec<Row>),
@@ -50,6 +77,9 @@ pub struct Pool {
     preparing: (Mutex<usize>, Condvar),
     max_prepares: usize,
     seal: Vec<Vec<[u8; 32]>>,
+    /// Per block and seal digest: the stored bytes matched it once.
+    checked: Vec<Arc<[AtomicBool]>>,
+    memos: Mutex<Memos>,
 }
 /// Seal digests of a block's stored bytes: the whole payload, or for JC06 the
 /// head and then every part.
@@ -108,6 +138,8 @@ impl Pool {
             preparing: (Mutex::new(0), Condvar::new()),
             max_prepares: max_prepares.max(1),
             seal: Vec::new(),
+            checked: Vec::new(),
+            memos: Mutex::new(Memos::default()),
         })
     }
     /// Checks every block in full, on up to `threads` threads, and returns
@@ -154,20 +186,28 @@ impl Pool {
         if seal.len() != self.entries.len() {
             return Err("seal does not match the archive's blocks".into());
         }
+        self.checked = seal
+            .iter()
+            .map(|d| d.iter().map(|_| AtomicBool::new(false)).collect())
+            .collect();
         self.seal = seal;
+        *self.memos.lock().unwrap_or_else(|p| p.into_inner()) = Memos::default();
         Ok(())
     }
     pub fn first(&self) -> Option<u32> {
         self.entries.first().map(|e| e.first)
     }
+    /// Bytes of cached prepared blocks and remembered transaction hashes.
     pub fn cached_bytes(&self) -> usize {
-        self.slots
+        let blocks: usize = self
+            .slots
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .0
             .iter()
             .map(|s| s.bytes)
-            .sum()
+            .sum();
+        blocks + self.memos.lock().unwrap_or_else(|p| p.into_inner()).bytes
     }
     /// Index of the block holding ledger `seq`: callers group reads by it.
     pub fn block_id(&self, seq: u32) -> Res<usize> {
@@ -206,24 +246,77 @@ impl Pool {
         let payload = self.payload(i)?;
         let hash = &self.entries[i].hash;
         let seal = self.seal.get(i).map_or(&[][..], Vec::as_slice);
+        let checked = self.checked.get(i);
+        // The first digest (whole payload, or a JC06 head): matched once in
+        // this process, or now.
+        let first_matches = |bytes: &[u8]| {
+            let flag = checked.and_then(|c| c.first());
+            if flag.is_some_and(|f| f.load(Ordering::Acquire)) {
+                return true;
+            }
+            let ok = seal[0] == seal_digest(hash, bytes);
+            if let (true, Some(f)) = (ok, flag) {
+                f.store(true, Ordering::Release);
+            }
+            ok
+        };
         // A JC06 block is trusted by its head here and by each part as it compiles.
         let parts = if payload.first() == Some(&2) && seal.len() > 1 {
             fast::frame_parts(&payload[1..])
                 .ok()
                 .filter(|l| {
-                    l.parts.len() + 1 == seal.len()
-                        && seal[0] == seal_digest(hash, &payload[..1 + l.head])
+                    l.parts.len() + 1 == seal.len() && first_matches(&payload[..1 + l.head])
                 })
                 .map(|_| seal[1..].to_vec())
         } else {
             None
         };
-        let sealed = parts.is_some() || (seal.len() == 1 && seal[0] == seal_digest(hash, &payload));
+        let sealed = parts.is_some() || (seal.len() == 1 && first_matches(&payload));
         let mut data = self.decode(i, &payload, sealed)?;
         if let (Some(digests), Data::Prepared(f)) = (parts, &mut data) {
             f.check_parts(*hash, digests)?;
+            if let Some(c) = checked {
+                let memo = self.tx_memo(i, f.tx_count());
+                f.remember(c.clone(), memo);
+            }
         }
         Ok(data)
+    }
+    /// Remembered transaction hashes of block `i` with `n` transactions,
+    /// dropping those of the least recently prepared blocks over `MEMO_BYTES`.
+    fn tx_memo(&self, i: usize, n: usize) -> fast::TxMemo {
+        let mut g = self.memos.lock().unwrap_or_else(|p| p.into_inner());
+        g.tick += 1;
+        let tick = g.tick;
+        let memo = match g.blocks.get_mut(&i) {
+            Some((m, used)) if m.len() == n => {
+                *used = tick;
+                return m.clone();
+            }
+            _ => {
+                let m: fast::TxMemo = (0..n).map(|_| OnceLock::new()).collect();
+                if let Some((old, _)) = g.blocks.insert(i, (m.clone(), tick)) {
+                    g.bytes -= memo_bytes(&old);
+                }
+                g.bytes += memo_bytes(&m);
+                m
+            }
+        };
+        while g.bytes > MEMO_BYTES {
+            let Some(k) = g
+                .blocks
+                .iter()
+                .filter(|(k, _)| **k != i)
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            if let Some((old, _)) = g.blocks.remove(&k) {
+                g.bytes -= memo_bytes(&old);
+            }
+        }
+        memo
     }
     fn payload(&self, i: usize) -> Res<Vec<u8>> {
         let e = &self.entries[i];
@@ -572,6 +665,59 @@ mod tests {
         assert!(err.contains("seal"), "{err}");
         assert_eq!(pool.ledger(30).unwrap(), rs[20]);
         assert!(Pool::open(&path, 1 << 20, 2).unwrap().ledger(10).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn parts_matched_once_are_remembered_across_evictions() {
+        let rs = rows(10, 40);
+        let opt = Options {
+            joint: true,
+            adaptive: true,
+            context_delta: true,
+            split_shapes: true,
+            chronological: true,
+            cached_slots: true,
+            hash_order: true,
+            part_raw: 600,
+            ..Options::default()
+        };
+        let (archive, _) = pack_bounded(&rs, 20, MAX, opt).unwrap();
+        let dir = std::env::temp_dir().join(format!("astj5-pool-memo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.astj");
+        std::fs::write(&path, &archive).unwrap();
+        let seal = Pool::open(&path, 1 << 20, 2).unwrap().seal(2).unwrap();
+        // One byte of budget: reading the other block evicts this one.
+        let mut pool = Pool::open(&path, 1, 1).unwrap();
+        pool.set_seal(seal.clone()).unwrap();
+        let flags = |pool: &Pool, b: usize| -> Vec<bool> {
+            pool.checked[b]
+                .iter()
+                .map(|f| f.load(Ordering::Acquire))
+                .collect()
+        };
+        assert!(flags(&pool, 0).iter().all(|f| !f));
+        for round in 0..3 {
+            for r in &rs {
+                assert_eq!(pool.ledger(r.seq).unwrap(), *r, "round {round}");
+            }
+            assert!((0..2).all(|b| flags(&pool, b).iter().all(|f| *f)));
+        }
+        assert_eq!(pool.memos.lock().unwrap().blocks.len(), 2);
+        // A part that does not match is never remembered: refused every time.
+        let e = &pool.entries[0];
+        let mut bad = archive.clone();
+        bad[e.offset as usize + e.length - 1] ^= 1;
+        std::fs::write(&path, &bad).unwrap();
+        let mut pool = Pool::open(&path, 1, 1).unwrap();
+        pool.set_seal(seal).unwrap();
+        for _ in 0..3 {
+            let err = pool.ledger(29).unwrap_err();
+            assert!(err.contains("seal"), "{err}");
+            assert_eq!(pool.ledger(30).unwrap(), rs[20]);
+        }
+        let f = flags(&pool, 0);
+        assert!(f[0] && !f[f.len() - 1]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]

@@ -1,5 +1,10 @@
 //! Compiled, byte-exact document programs. No per-field Rc/Vec allocation at read time.
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+/// Transaction hashes of a block by position, shared with the pool so that a
+/// block prepared again after eviction does not hash its transactions again.
+pub(crate) type TxMemo = Arc<[OnceLock<[u8; 32]>]>;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Atom {
     pub(crate) at: u32,
@@ -140,6 +145,10 @@ struct Shared {
     dictionary_bytes: usize,
     /// Block hash and part digests from a seal (`check_parts`).
     sealed: Option<([u8; 32], Vec<[u8; 32]>)>,
+    /// Which of the block's seal digests (the head first, then every part)
+    /// its stored bytes were already found to match in this process, kept by
+    /// the pool across preparations (`remember`).
+    checked: Option<Arc<[AtomicBool]>>,
 }
 /// JC06 frame: the shared section, and every part with its raw size, as
 /// ranges of the frame. `head` ends where the parts begin.
@@ -206,6 +215,8 @@ pub struct Prepared {
     pub(crate) keys: Vec<(u8, Vec<Atom>)>,
     key_hashes: Vec<Option<[u8; 32]>>,
     tx_hashes: Vec<Option<[u8; 32]>>,
+    /// The pool's copy of `tx_hashes`, for a sealed JC06 block (`remember`).
+    tx_memo: Option<TxMemo>,
     ledgers: Vec<Planned>,
     shared: Box<Shared>,
 }
@@ -457,6 +468,50 @@ impl Prepared {
         self.shared.sealed = Some((hash, digests));
         Ok(())
     }
+    /// For a block checked by its seal (`check_parts`): what earlier
+    /// preparations of the same block in this process found. `checked` has a
+    /// flag per seal digest (the head, then every part): a part whose flag is
+    /// set already matched its digest and is not hashed again, and a part that
+    /// matches sets it. `tx` holds the hashes of the block's transactions by
+    /// position; they are taken from it and added to it. Both come from bytes
+    /// that matched the seal, so neither is used for a block without one.
+    pub(crate) fn remember(&mut self, checked: Arc<[AtomicBool]>, tx: TxMemo) {
+        if self.shared.sealed.is_none() {
+            return;
+        }
+        if checked.len() == self.shared.spans.len() + 1 {
+            self.shared.checked = Some(checked);
+        }
+        if tx.len() == self.tx_hashes.len() {
+            self.tx_memo = Some(tx);
+        }
+    }
+    /// Transactions in the block.
+    pub(crate) fn tx_count(&self) -> usize {
+        self.tx_hashes.len()
+    }
+    /// Hash of the transaction at `index`, if this block or an earlier
+    /// preparation of it already computed it.
+    fn known_tx(&mut self, index: usize) -> Res<Option<[u8; 32]>> {
+        let local = *self.tx_hashes.get(index).ok_or("TX hash index")?;
+        if local.is_some() {
+            return Ok(local);
+        }
+        let memo = self
+            .tx_memo
+            .as_ref()
+            .and_then(|m| m.get(index)?.get().copied());
+        if memo.is_some() {
+            self.tx_hashes[index] = memo;
+        }
+        Ok(memo)
+    }
+    fn keep_tx(&mut self, index: usize, hash: [u8; 32]) {
+        self.tx_hashes[index] = Some(hash);
+        if let Some(m) = self.tx_memo.as_ref().and_then(|m| m.get(index)) {
+            let _ = m.set(hash);
+        }
+    }
     /// Shared section of `raw`; for JC02-JC05 the single part that follows it is
     /// compiled too, for JC06 `parts` holds the compressed parts.
     fn shared(raw: &[u8], auxiliary: bool, parts: Option<Frames>) -> Res<Self> {
@@ -611,6 +666,7 @@ impl Prepared {
             key_hashes: vec![None; keys.len()],
             keys,
             tx_hashes: vec![None; first_tx],
+            tx_memo: None,
             ledgers,
             shared: Box::new(Shared {
                 templates,
@@ -627,6 +683,7 @@ impl Prepared {
                 dictionary_bytes: if v6 { raw.len() } else { 0 },
                 dictionary,
                 sealed: None,
+                checked: None,
             }),
         };
         if !v6 {
@@ -651,10 +708,16 @@ impl Prepared {
             return Ok(());
         }
         let (at, len, raw) = self.shared.spans[p];
-        if let Some((hash, digests)) = &self.shared.sealed
-            && seal_digest(hash, &self.shared.frames[at..at + len]) != digests[p]
-        {
-            return Err("part does not match its seal".into());
+        if let Some((hash, digests)) = &self.shared.sealed {
+            let flag = self.shared.checked.as_ref().map(|c| &c[p + 1]);
+            if !flag.is_some_and(|f| f.load(Ordering::Acquire)) {
+                if seal_digest(hash, &self.shared.frames[at..at + len]) != digests[p] {
+                    return Err("part does not match its seal".into());
+                }
+                if let Some(f) = flag {
+                    f.store(true, Ordering::Release);
+                }
+            }
         }
         let bytes = {
             let d = self.shared.dictionary.as_ref().ok_or("journal parts")?;
@@ -678,12 +741,23 @@ impl Prepared {
         let v6 = self.shared.v6;
         let mut tx = Vec::with_capacity(self.layout[i].tx.len());
         for (id, meta) in self.layout[i].tx.clone() {
-            // TX programs cannot refer to TX-derived hashes (checked when compiled).
-            let hash = shamap::tx_id(&self.document(id)?);
             // Derived hashes name encoded positions in JC06, original ones before.
-            if v6 {
-                self.tx_hashes[first + (id - header - 1) / 2] = Some(hash);
-            }
+            let index = v6.then(|| first + (id - header - 1) / 2);
+            let known = match index {
+                Some(k) => self.known_tx(k)?,
+                None => None,
+            };
+            let hash = match known {
+                Some(hash) => hash,
+                None => {
+                    // TX programs cannot refer to TX-derived hashes (checked when compiled).
+                    let hash = shamap::tx_id(&self.document(id)?);
+                    if let Some(k) = index {
+                        self.keep_tx(k, hash);
+                    }
+                    hash
+                }
+            };
             tx.push((hash, id, meta));
         }
         tx.sort_unstable();
@@ -927,12 +1001,12 @@ impl Prepared {
             let a = self.atoms[at];
             if a.len == TX {
                 let index = a.at as usize;
-                let hash = if let Some(hash) = self.tx_hashes.get(index).ok_or("TX hash index")? {
-                    *hash
+                let hash = if let Some(hash) = self.known_tx(index)? {
+                    hash
                 } else {
                     let doc = self.tx_document(index)?;
                     let hash = shamap::tx_id(&self.document(doc)?);
-                    self.tx_hashes[index] = Some(hash);
+                    self.keep_tx(index, hash);
                     hash
                 };
                 out.extend(hash)
