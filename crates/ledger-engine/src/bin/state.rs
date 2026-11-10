@@ -155,6 +155,26 @@ enum Command {
         #[arg(long, default_value_t = 2000)]
         samples: usize,
     },
+    /// Build the version index of cold history (`coldstate`): for every object
+    /// key, the ledgers that changed it, from the ledger after the base snapshot
+    /// through `--to`. Run it only over ledgers whose state roots a replay has
+    /// checked: the index serves exactly the range it records. `--db` is not used.
+    HistoryStateIndex {
+        #[arg(long)]
+        cold: PathBuf,
+        /// Directory to write the index into.
+        #[arg(long)]
+        out: PathBuf,
+        /// XWLS snapshot of the base ledger, the one before the first cold ledger.
+        #[arg(long)]
+        base: PathBuf,
+        /// Last ledger to index; by default the last in the cold history.
+        #[arg(long)]
+        to: Option<u32>,
+        /// Pairs of key and ledger held in memory before going to temporary files.
+        #[arg(long, default_value_t = 200_000_000)]
+        spill_after: usize,
+    },
     /// Replay the state patches of cold history from a snapshot of the state
     /// at the ledger before `--cold` starts, checking the root against
     /// AccountHash on every ledger. Writes nothing but checkpoints. Stops at
@@ -1035,6 +1055,35 @@ fn main() -> Result<(), String> {
                 accounts.len(),
                 t.elapsed().as_secs_f64()
             );
+        }
+        Command::HistoryStateIndex {
+            cold,
+            out,
+            base,
+            to,
+            spill_after,
+        } => {
+            let (header, objects) = snapshot(&base)?;
+            let base_seq = LedgerHeader::parse(&header)
+                .map_err(|e| e.to_string())?
+                .sequence;
+            let base = objects.collect::<Result<Vec<_>, String>>()?;
+            let last = match to {
+                Some(t) => t,
+                None => ledger_engine::cold::Cold::open(&cold)?
+                    .last()
+                    .ok_or("no cold segments")?,
+            };
+            let m = ledger_engine::coldstate::build_from_dirs(
+                &cold,
+                &out,
+                base_seq + 1,
+                last,
+                base,
+                spill_after,
+            )?;
+            println!("{m}");
+            println!("built in {:.1} s", t.elapsed().as_secs_f64());
         }
         Command::HistoryStateReplay {
             cold,
