@@ -12,15 +12,22 @@
 //!   zstd-compressed entries sorted by key, then a directory of the blocks, then a
 //!   footer. An entry is the key (32 bytes), the number of ledgers (varint) and the
 //!   ledgers as ascending deltas (varints, the first absolute). The directory holds,
-//!   per block, its first key (32 bytes), offset (u64), stored length (u32) and
-//!   decoded length (u32); the footer holds the block count (u32), the directory
-//!   offset (u64) and `MAGIC`. All integers are little-endian.
+//!   per block, its first key (32 bytes), offset (u64), stored length (u32),
+//!   decoded length (u32) and the sha256 of its stored bytes (32 bytes); the footer
+//!   holds the block count (u32), the directory offset (u64), the sha256 of the
+//!   directory (32 bytes) and `MAGIC`. All integers are little-endian.
 //! - `base.bin`: the objects of the base state at ledger `first - 1`, which the
 //!   cold patches do not carry: `MAGIC`, the base ledger (u32), the count (u32), then
 //!   per object the key, the length (u32) and the bytes, in key order.
 //! - `manifest.json`, written last: format, `first` and `last` cold ledger, base
 //!   ledger, and the sha256 of every file. Without it the index does not open, so
 //!   a build that stopped half way is never read.
+//!
+//! Damage is refused, never answered: opening checks every bucket's directory
+//! against the sha256 in its footer and `base.bin` against the manifest, and every
+//! block read checks the block against its sha256 in the directory. `verify`
+//! checks every file against the manifest in full, for use before an index is
+//! attached.
 //!
 //! The served range is from the base ledger to `last`. Building it is a single pass
 //! over the cold patches; pairs of key and ledger are held per bucket in memory and
@@ -51,7 +58,7 @@ const BUCKETS: usize = 256;
 const BLOCK: usize = 64 << 10;
 const MANIFEST: &str = "manifest.json";
 const BASE: &str = "base.bin";
-const FOOTER: usize = 4 + 8 + MAGIC.len();
+const FOOTER: usize = 4 + 8 + 32 + MAGIC.len();
 
 fn io(e: std::io::Error) -> String {
     e.to_string()
@@ -116,7 +123,7 @@ impl Out {
 fn write_bucket(path: &Path, pairs: &[(Hash, u32)]) -> Res<(u64, u64, String)> {
     let mut out = Out::create(path)?;
     out.put(MAGIC)?;
-    let mut dir: Vec<(Hash, u64, u32, u32)> = Vec::new();
+    let mut dir: Vec<BlockRef> = Vec::new();
     let mut block = Vec::with_capacity(BLOCK * 2);
     let mut block_first: Option<Hash> = None;
     let mut keys = 0u64;
@@ -125,7 +132,13 @@ fn write_bucket(path: &Path, pairs: &[(Hash, u32)]) -> Res<(u64, u64, String)> {
             return Ok(());
         };
         let z = zstd::bulk::compress(block, 3).map_err(io)?;
-        dir.push((k, out.len, z.len() as u32, block.len() as u32));
+        dir.push(BlockRef {
+            first: k,
+            off: out.len,
+            len: z.len() as u32,
+            raw: block.len() as u32,
+            sha: Sha256::digest(&z).into(),
+        });
         out.put(&z)?;
         block.clear();
         Ok(())
@@ -155,14 +168,18 @@ fn write_bucket(path: &Path, pairs: &[(Hash, u32)]) -> Res<(u64, u64, String)> {
     }
     flush(&mut out, &mut block, &mut block_first)?;
     let dir_at = out.len;
-    for (k, off, len, raw) in &dir {
-        out.put(k)?;
-        out.put(&off.to_le_bytes())?;
-        out.put(&len.to_le_bytes())?;
-        out.put(&raw.to_le_bytes())?;
+    let mut table = Vec::with_capacity(dir.len() * DIR_ENTRY);
+    for b in &dir {
+        table.extend_from_slice(&b.first);
+        table.extend_from_slice(&b.off.to_le_bytes());
+        table.extend_from_slice(&b.len.to_le_bytes());
+        table.extend_from_slice(&b.raw.to_le_bytes());
+        table.extend_from_slice(&b.sha);
     }
+    out.put(&table)?;
     out.put(&(dir.len() as u32).to_le_bytes())?;
     out.put(&dir_at.to_le_bytes())?;
+    out.put(&Sha256::digest(&table))?;
     out.put(MAGIC)?;
     Ok((keys, pairs.len() as u64, out.finish()?))
 }
@@ -289,11 +306,23 @@ pub fn build(dir: &Path, b: &Build<'_>) -> Res<Value> {
     Ok(manifest)
 }
 
+/// Where a block lies in its bucket file and what its stored bytes hash to.
+#[derive(Debug, Clone)]
+struct BlockRef {
+    first: Hash,
+    off: u64,
+    len: u32,
+    raw: u32,
+    sha: Hash,
+}
+
+const DIR_ENTRY: usize = 32 + 8 + 4 + 4 + 32;
+
 /// One bucket file opened for reading: its block directory in memory.
 #[derive(Debug)]
 struct Bucket {
     file: File,
-    dir: Vec<(Hash, u64, u32, u32)>,
+    dir: Vec<BlockRef>,
 }
 
 impl Bucket {
@@ -308,26 +337,36 @@ impl Bucket {
         }
         file.read_exact_at(&mut foot, len - FOOTER as u64)
             .map_err(io)?;
-        if &head != MAGIC || &foot[12..] != MAGIC {
+        if &head != MAGIC || &foot[44..] != MAGIC {
             return Err(corrupt("bucket magic"));
         }
         let n = u32::from_le_bytes(foot[..4].try_into().map_err(|_| corrupt("footer"))?) as usize;
         let at = u64::from_le_bytes(foot[4..12].try_into().map_err(|_| corrupt("footer"))?);
-        let mut raw = vec![0u8; n * 48];
-        file.read_exact_at(&mut raw, at).map_err(io)?;
-        let dir = raw
-            .as_chunks::<48>()
+        let size = n
+            .checked_mul(DIR_ENTRY)
+            .filter(|s| at.checked_add(*s as u64) == Some(len - FOOTER as u64))
+            .ok_or_else(|| corrupt("directory size"))?;
+        let mut table = vec![0u8; size];
+        file.read_exact_at(&mut table, at).map_err(io)?;
+        if Sha256::digest(&table).as_slice() != &foot[12..44] {
+            return Err(corrupt("directory does not match its sha256"));
+        }
+        let dir = table
+            .as_chunks::<DIR_ENTRY>()
             .0
             .iter()
             .map(|c| {
-                let mut k = [0u8; 32];
-                k.copy_from_slice(&c[..32]);
-                (
-                    k,
-                    u64::from_le_bytes(c[32..40].try_into().unwrap_or_default()),
-                    u32::from_le_bytes(c[40..44].try_into().unwrap_or_default()),
-                    u32::from_le_bytes(c[44..48].try_into().unwrap_or_default()),
-                )
+                let mut first = [0u8; 32];
+                first.copy_from_slice(&c[..32]);
+                let mut sha = [0u8; 32];
+                sha.copy_from_slice(&c[48..80]);
+                BlockRef {
+                    first,
+                    off: u64::from_le_bytes(c[32..40].try_into().unwrap_or_default()),
+                    len: u32::from_le_bytes(c[40..44].try_into().unwrap_or_default()),
+                    raw: u32::from_le_bytes(c[44..48].try_into().unwrap_or_default()),
+                    sha,
+                }
             })
             .collect();
         Ok(Bucket { file, dir })
@@ -335,13 +374,19 @@ impl Bucket {
 
     /// Ledgers that changed `key`, ascending; empty if it was never changed.
     fn ledgers(&self, key: &Hash) -> Res<Vec<u32>> {
-        let Some(b) = self.dir.partition_point(|d| d.0 <= *key).checked_sub(1) else {
+        let Some(b) = self.dir.partition_point(|d| d.first <= *key).checked_sub(1) else {
             return Ok(vec![]);
         };
-        let (_, off, len, raw) = self.dir[b];
-        let mut z = vec![0u8; len as usize];
-        self.file.read_exact_at(&mut z, off).map_err(io)?;
-        let block = zstd::bulk::decompress(&z, raw as usize).map_err(io)?;
+        let r = &self.dir[b];
+        let mut z = vec![0u8; r.len as usize];
+        self.file.read_exact_at(&mut z, r.off).map_err(io)?;
+        if Sha256::digest(&z).as_slice() != r.sha {
+            return Err(corrupt(format!(
+                "block at offset {} does not match its sha256",
+                r.off
+            )));
+        }
+        let block = zstd::bulk::decompress(&z, r.raw as usize).map_err(io)?;
         let mut at = 0;
         while at < block.len() {
             let k: Hash = block
@@ -408,6 +453,9 @@ impl VersionIndex {
             buckets.push(Bucket::open(&dir.join(bucket_name(n)))?);
         }
         let raw = fs::read(dir.join(BASE)).map_err(io)?;
+        if m["base_sha256"].as_str() != Some(hex::encode(Sha256::digest(&raw)).as_str()) {
+            return Err(corrupt("base.bin does not match the manifest"));
+        }
         if raw.get(..MAGIC.len()) != Some(&MAGIC[..]) {
             return Err(corrupt("base magic"));
         }
@@ -488,6 +536,38 @@ impl VersionIndex {
             .ok_or_else(|| corrupt(format!("ledger {seq} has no change of a key listed for it")))?;
         Ok(Some((seq, data)))
     }
+}
+
+/// Checks every file of the index in `dir` against the sha256 in its manifest,
+/// reading each file in full. Meant to run once before an index is attached;
+/// `open` and every read check their own parts on top of this.
+pub fn verify(dir: &Path) -> Res<()> {
+    let m: Value =
+        serde_json::from_slice(&fs::read(dir.join(MANIFEST)).map_err(io)?).map_err(corrupt)?;
+    let list = m["buckets"].as_array().ok_or_else(|| corrupt("buckets"))?;
+    if list.len() != BUCKETS {
+        return Err(corrupt("bucket count"));
+    }
+    let mut files: Vec<(String, &str)> = Vec::with_capacity(BUCKETS + 1);
+    for (n, b) in list.iter().enumerate() {
+        let sha = b["sha256"]
+            .as_str()
+            .ok_or_else(|| corrupt(format!("bucket {n} sha256")))?;
+        files.push((bucket_name(n), sha));
+    }
+    let base = m["base_sha256"]
+        .as_str()
+        .ok_or_else(|| corrupt("base_sha256"))?;
+    files.push((BASE.to_string(), base));
+    for (name, want) in files {
+        let mut f = File::open(dir.join(&name)).map_err(io)?;
+        let mut h = Sha256::new();
+        std::io::copy(&mut f, &mut h).map_err(io)?;
+        if hex::encode(h.finalize()) != want {
+            return Err(corrupt(format!("{name} does not match the manifest")));
+        }
+    }
+    Ok(())
 }
 
 /// The command-line entry: builds from a cold directory into `out` with the
@@ -729,5 +809,79 @@ mod tests {
         assert!(VersionIndex::open(out.path()).is_err());
         fs::remove_file(out.path().join(MANIFEST)).unwrap();
         assert!(VersionIndex::open(out.path()).is_err());
+    }
+
+    /// The bucket whose first block has the most bytes, and that block's span.
+    fn biggest_block(dir: &Path) -> (usize, u64, u32) {
+        (0..BUCKETS)
+            .filter_map(|n| {
+                let b = Bucket::open(&dir.join(bucket_name(n))).unwrap();
+                b.dir.first().map(|d| (n, d.off, d.len))
+            })
+            .max_by_key(|x| x.2)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_byte_flipped_inside_a_block_is_refused_on_read() {
+        let (_c, cold, base, _) = setup();
+        let out = tempfile::tempdir().unwrap();
+        build_into(out.path(), &cold, &base, 1 << 20);
+        verify(out.path()).unwrap();
+        let (n, off, len) = biggest_block(out.path());
+        let path = out.path().join(bucket_name(n));
+        let mut b = fs::read(&path).unwrap();
+        b[(off + u64::from(len) / 2) as usize] ^= 0x40;
+        fs::write(&path, &b).unwrap();
+        // The directory is intact, so the index opens; every read of that
+        // block fails instead of answering, and verify names the file.
+        let idx = VersionIndex::open(out.path()).unwrap();
+        let first = Bucket::open(&path).unwrap().dir[0].first;
+        let end = Bucket::open(&path).unwrap().dir.get(1).map(|d| d.first);
+        assert!(idx.ledgers(&first).unwrap_err().contains("sha256"));
+        let mut refused = 0;
+        for n2 in 0..40u8 {
+            let k = key(n2);
+            if usize::from(k[0]) == n && k >= first && end.is_none_or(|e| k < e) {
+                let e = idx.version_at(&cold, &k, FIRST + N - 1).unwrap_err();
+                assert!(e.contains("sha256"), "{e}");
+                refused += 1;
+            }
+        }
+        assert!(refused > 0);
+        assert!(verify(out.path()).unwrap_err().contains(&bucket_name(n)));
+    }
+
+    #[test]
+    fn a_byte_flipped_in_the_directory_or_base_does_not_open() {
+        let (_c, cold, base, _) = setup();
+        let out = tempfile::tempdir().unwrap();
+        build_into(out.path(), &cold, &base, 1 << 20);
+        let (n, _, _) = biggest_block(out.path());
+        let path = out.path().join(bucket_name(n));
+        let good = fs::read(&path).unwrap();
+        // The directory starts right after the last block; byte 40 is inside
+        // the stored length of the first entry.
+        let b0 = Bucket::open(&path).unwrap();
+        let last = b0.dir.last().unwrap();
+        let dir_at = (last.off + u64::from(last.len)) as usize;
+        let mut b = good.clone();
+        b[dir_at + 40] ^= 1;
+        fs::write(&path, &b).unwrap();
+        assert!(VersionIndex::open(out.path()).is_err());
+        fs::write(&path, &good).unwrap();
+        VersionIndex::open(out.path()).unwrap();
+
+        let bp = out.path().join(BASE);
+        let mut raw = fs::read(&bp).unwrap();
+        let mid = raw.len() / 2;
+        raw[mid] ^= 1;
+        fs::write(&bp, &raw).unwrap();
+        assert!(
+            VersionIndex::open(out.path())
+                .unwrap_err()
+                .contains("base.bin")
+        );
+        assert!(verify(out.path()).unwrap_err().contains("base.bin"));
     }
 }

@@ -1084,6 +1084,10 @@ fn main() -> Result<(), String> {
             )?;
             println!("{m}");
             println!("built in {:.1} s", t.elapsed().as_secs_f64());
+            let t = Instant::now();
+            ledger_engine::coldstate::verify(&out)?;
+            ledger_engine::coldstate::VersionIndex::open(&out)?;
+            println!("verified in {:.1} s", t.elapsed().as_secs_f64());
         }
         Command::HistoryStateReplay {
             cold,
