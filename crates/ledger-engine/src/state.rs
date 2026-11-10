@@ -193,6 +193,8 @@ pub struct StateStore {
     levels: Keyspace,
     /// Anchor evidence: ledger → quorum validations (JSON).
     evidence: Keyspace,
+    /// State before the snapshot, if a version index is attached.
+    old: std::sync::RwLock<Option<std::sync::Arc<dyn OldState>>>,
 }
 
 /// What the tree holds at a key's position.
@@ -211,6 +213,32 @@ pub struct TreePath {
     pub header: Vec<u8>,
     pub path: witness_core::shamap::Path,
     pub leaf: Leaf,
+}
+
+/// State before the snapshot, from another store: `version` with the same
+/// contract as `StateStore::version`, for ledgers in `range`.
+pub trait OldState: Send + Sync + std::fmt::Debug {
+    /// First and last ledger it can answer for.
+    fn range(&self) -> (u32, u32);
+    /// The last version of `key` at or before `at`: ledger and object, empty if
+    /// deleted there; `None` if it did not exist yet.
+    fn version(&self, key: &[u8; 32], at: u32) -> Result<Option<(u32, Vec<u8>)>, String>;
+}
+
+/// The version index over cold history and the cold segments it points into.
+#[derive(Debug)]
+pub struct ColdOldState {
+    pub index: crate::coldstate::VersionIndex,
+    pub cold: crate::cold::Cold,
+}
+
+impl OldState for ColdOldState {
+    fn range(&self) -> (u32, u32) {
+        self.index.range()
+    }
+    fn version(&self, key: &[u8; 32], at: u32) -> Result<Option<(u32, Vec<u8>)>, String> {
+        self.index.version_at(&self.cold, key, at)
+    }
 }
 
 impl std::fmt::Debug for StateStore {
@@ -268,6 +296,7 @@ impl StateStore {
             tree,
             levels,
             evidence,
+            old: std::sync::RwLock::new(None),
         })
     }
 
@@ -1589,12 +1618,47 @@ impl StateStore {
             .and_then(|(_, v)| (!v.is_empty()).then_some(v)))
     }
 
+    /// Attaches the state before the snapshot (the version index over cold
+    /// history). From then on `version`, `get` and `get_many` answer for its range
+    /// too.
+    pub fn set_old_state(&self, old: std::sync::Arc<dyn OldState>) {
+        *self.old.write().unwrap_or_else(|p| p.into_inner()) = Some(old);
+    }
+
+    /// Ledgers the attached old state answers for, if one is attached.
+    pub fn old_range(&self) -> Option<(u32, u32)> {
+        self.old
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|o| o.range())
+    }
+
+    /// Whether state as of ledger `seq` can be read: from the snapshot on, or
+    /// within the range of the attached old state.
+    pub fn serves(&self, seq: u32) -> Result<bool, String> {
+        if self.base()?.is_some_and(|b| seq >= b) {
+            return Ok(true);
+        }
+        Ok(self
+            .old_range()
+            .is_some_and(|(lo, hi)| seq >= lo && seq <= hi))
+    }
+
     /// The last version of `key` written up to ledger `at`: the ledger and the
-    /// object, empty if it was deleted in that ledger.
+    /// object, empty if it was deleted in that ledger. Below the snapshot it is
+    /// read from the attached old state, within its range.
     pub fn version(&self, key: &[u8; 32], at: u32) -> Result<Option<(u32, Vec<u8>)>, String> {
         match self.base()? {
             Some(b) if at >= b => {}
             _ => {
+                let old = self.old.read().unwrap_or_else(|p| p.into_inner()).clone();
+                if let Some(o) = old {
+                    let (lo, hi) = o.range();
+                    if at >= lo && at <= hi {
+                        return o.version(key, at);
+                    }
+                }
                 return Err(format!(
                     "no state for ledger {at}: it is before the snapshot"
                 ));

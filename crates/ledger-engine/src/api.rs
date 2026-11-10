@@ -322,6 +322,26 @@ impl Engine {
         }
     }
 
+    /// Like `resolve_state`, but below the snapshot it also accepts ledgers the
+    /// attached old state (the version index over cold history) answers for.
+    /// Only methods that read objects by key use it: account_info, ledger_entry,
+    /// account_lines and account_objects. The rest keep `resolve_state`.
+    pub(crate) fn resolve_old_state(&self, p: &Map<String, Value>) -> Res<u32> {
+        let seq = self.resolve(p)?;
+        if self
+            .state
+            .base()
+            .map_err(internal)?
+            .is_some_and(|b| seq >= b)
+        {
+            return Ok(seq);
+        }
+        match self.state.old_range() {
+            Some((lo, hi)) if seq >= lo && seq <= hi => Ok(seq),
+            _ => Err(lgr_not_found()),
+        }
+    }
+
     pub(crate) fn header_json(
         &self,
         raw: &[u8],
@@ -522,6 +542,10 @@ impl Engine {
         });
         if let Some(q) = self.quorum_at(max, &h.hash()) {
             info["validation_quorum"] = json!(q);
+        }
+        // State before the snapshot, when a version index over cold history is attached.
+        if let Some((lo, hi)) = self.state.old_range() {
+            info["astraea"]["old_state_ledgers"] = json!(format!("{lo}-{hi}"));
         }
         let mut m = Map::new();
         m.insert("info".into(), info);
@@ -1050,15 +1074,20 @@ impl Engine {
 
     fn ledger_entry(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
         let (key, expected) = crate::selector::entry_key(p)?;
-        let seq = self.resolve_state(p)?;
+        let seq = self.resolve_old_state(p)?;
         let (_, h) = self.header(seq)?;
         let not_found = || rpc_err("entryNotFound", 98, "Entry not found.");
         // include_deleted, as in Clio: a deleted object as it was in the
         // ledger before the one that deleted it.
-        let base = self.state.base().map_err(internal)?.unwrap_or(u32::MAX);
-        let (data, deleted) = match self.state.version(&key, seq).map_err(internal)? {
+        let version = self.state.version(&key, seq).map_err(internal)?;
+        // The ledger before the deleting one must have state, hot or old.
+        let before_readable = match &version {
+            Some((at, _)) if *at > 0 => self.state.serves(at - 1).map_err(internal)?,
+            _ => false,
+        };
+        let (data, deleted) = match version {
             Some((_, v)) if !v.is_empty() => (v, None),
-            Some((at, _)) if as_bool(p.get("include_deleted")) && at > base => {
+            Some((at, _)) if as_bool(p.get("include_deleted")) && before_readable => {
                 let v = self
                     .state
                     .get(&key, at - 1)
@@ -1100,7 +1129,7 @@ impl Engine {
             .get("account")
             .or_else(|| p.get("ident"))
             .ok_or_else(|| invalid_params("Missing field 'account'."))?;
-        let seq = self.resolve_state(p)?;
+        let seq = self.resolve_old_state(p)?;
         let a = account_id(v)?;
         let (_, h) = self.header(seq)?;
         let key = keylet(b'a', &[&a]);

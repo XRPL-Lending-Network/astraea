@@ -258,11 +258,26 @@ impl Engine {
 
     /// Account, ledger and request header; if the account doesn't exist, actNotFound.
     pub(crate) fn owner_of(&self, p: &Map<String, Value>) -> Res<([u8; 20], u32, [u8; 32])> {
+        self.owner_at(p, false)
+    }
+
+    /// Like `owner_of`; with `old`, ledgers before the snapshot that the
+    /// attached old state answers for are accepted too (account_lines and
+    /// account_objects only).
+    pub(crate) fn owner_at(
+        &self,
+        p: &Map<String, Value>,
+        old: bool,
+    ) -> Res<([u8; 20], u32, [u8; 32])> {
         let a = account_id(
             p.get("account")
                 .ok_or_else(|| invalid_params("Required field 'account' missing"))?,
         )?;
-        let seq = self.resolve_state(p)?;
+        let seq = if old {
+            self.resolve_old_state(p)?
+        } else {
+            self.resolve_state(p)?
+        };
         let (_, h) = self.header(seq)?;
         if self.fetch(&keylet(b'a', &[&a]), seq)?.is_none() {
             return Err(rpc_err("actNotFound", 19, "Account not found."));
@@ -431,7 +446,7 @@ impl Engine {
         let limit = owned_limit(p)?;
         let only = type_filter(p, true)?;
         let cursor = parse_cursor(p)?;
-        let (account, seq, hash) = self.owner_of(p)?;
+        let (account, seq, hash) = self.owner_at(p, true)?;
         let blockers = as_bool(p.get("deletion_blockers_only"));
         let keep = |t: &str| -> bool {
             if blockers {
@@ -474,7 +489,7 @@ impl Engine {
             .get("peer")
             .map(|v| account_id(v).map_err(|_| rpc_err("actMalformed", 35, "Account malformed.")))
             .transpose()?;
-        let (account, seq, hash) = self.owner_of(p)?;
+        let (account, seq, hash) = self.owner_at(p, true)?;
         let ignore_default = as_bool(p.get("ignore_default"));
         let mut lines = Vec::new();
         let marker = self.owned(&account, seq, limit, cursor, false, &mut |k, d| {
