@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.5
+
+- `AGENTS.md` tells coding agents how to build, check and change the project, and defers to `CONTRIBUTING.md` and `SECURITY.md`. No code or answer changes.
+
 ## 0.5.0
 
 The first stable release. A public endpoint run by the maintainers will follow; until then the server is meant to be run by those who use it.
