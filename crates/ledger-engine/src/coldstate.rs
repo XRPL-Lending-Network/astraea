@@ -17,14 +17,16 @@
 //!   holds the block count (u32), the directory offset (u64), the sha256 of the
 //!   directory (32 bytes) and `MAGIC`. All integers are little-endian.
 //! - `base.bin`: the objects of the base state at ledger `first - 1`, which the
-//!   cold patches do not carry: `MAGIC`, the base ledger (u32), the count (u32), then
+//!   cold patches do not carry: `MAGIC`, the base ledger (u32), the first and last
+//!   indexed cold ledger (u32 each), the count (u32), then
 //!   per object the key, the length (u32) and the bytes, in key order.
 //! - `manifest.json`, written last: format, `first` and `last` cold ledger, base
 //!   ledger, and the sha256 of every file. Without it the index does not open, so
 //!   a build that stopped half way is never read.
 //!
 //! Damage is refused, never answered: opening checks every bucket's directory
-//! against the sha256 in its footer and `base.bin` against the manifest, and every
+//! against the sha256 in its footer, `base.bin` against the manifest, and the
+//! manifest's ledger range against the copy in `base.bin`; every
 //! block read checks the block against its sha256 in the directory. `verify`
 //! checks every file against the manifest in full, for use before an index is
 //! attached.
@@ -285,6 +287,10 @@ pub fn build(dir: &Path, b: &Build<'_>) -> Res<Value> {
     let mut out = Out::create(&dir.join(BASE))?;
     out.put(MAGIC)?;
     out.put(&base_seq.to_le_bytes())?;
+    // The range is repeated here so that the hashed file, not only the
+    // manifest, decides which ledgers the index answers for.
+    out.put(&b.first.to_le_bytes())?;
+    out.put(&b.last.to_le_bytes())?;
     out.put(&(base.len() as u32).to_le_bytes())?;
     for (k, d) in &base {
         out.put(k)?;
@@ -467,9 +473,19 @@ impl VersionIndex {
             at += n;
             Ok(s)
         };
-        let seq = u32::from_le_bytes(take(4)?.try_into().map_err(|_| corrupt("base"))?);
-        if seq != base_seq {
-            return Err(corrupt("base ledger does not match the manifest"));
+        let mut word = || -> Res<u32> {
+            Ok(u32::from_le_bytes(
+                take(4)?.try_into().map_err(|_| corrupt("base"))?,
+            ))
+        };
+        let (seq, f, l) = (word()?, word()?, word()?);
+        if (seq, f, l) != (base_seq, first, last)
+            || first != base_seq.wrapping_add(1)
+            || last < first
+        {
+            return Err(corrupt(
+                "ledger range in base.bin does not match the manifest",
+            ));
         }
         let count = u32::from_le_bytes(take(4)?.try_into().map_err(|_| corrupt("base"))?);
         let mut base = BTreeMap::new();
@@ -850,6 +866,32 @@ mod tests {
         }
         assert!(refused > 0);
         assert!(verify(out.path()).unwrap_err().contains(&bucket_name(n)));
+    }
+
+    #[test]
+    fn a_changed_range_in_the_manifest_does_not_open() {
+        let (_c, cold, base, _) = setup();
+        let out = tempfile::tempdir().unwrap();
+        build_into(out.path(), &cold, &base, 1 << 20);
+        let mp = out.path().join(MANIFEST);
+        let good = fs::read_to_string(&mp).unwrap();
+        VersionIndex::open(out.path()).unwrap();
+        // One range field changed by 9: still valid JSON, and the file hashes
+        // in the manifest still match, so only the range check sees it.
+        for (field, at) in [
+            ("last", FIRST + N - 1),
+            ("first", FIRST),
+            ("base", FIRST - 1),
+        ] {
+            let mut m: Value = serde_json::from_str(&good).unwrap();
+            assert_eq!(m[field], json!(at), "{field}");
+            m[field] = json!(at + 9);
+            fs::write(&mp, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+            let e = VersionIndex::open(out.path()).unwrap_err();
+            assert!(e.contains("does not match the manifest"), "{field}: {e}");
+        }
+        fs::write(&mp, &good).unwrap();
+        VersionIndex::open(out.path()).unwrap();
     }
 
     #[test]
