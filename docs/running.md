@@ -119,6 +119,8 @@ Segments in the older `astraea-cold/1` format hold every state patch. `astraea-s
 
 Segments written before 0.3 also carry ASIX2 indexes (`cold-F.asix`) that nothing reads; `astraea-state history-cold-drop-index <dir>` removes them, the manifest first and then the file. Run it after the server has been upgraded to 0.3: earlier versions refuse a segment whose manifest lacks the file.
 
+`astraea-state history-state-replay` checks the state patches of the cold history: starting from a state snapshot, it applies each ledger's patches and compares the state root with the header. Use it before building a version index; it stops at the first ledger that differs. `astraea-state history-state-index` then builds the index for the checked range from the same snapshot (`--base`) and the cold directory, and checks every file it wrote. The index answers only for the range in its manifest. Serving it from `astraea-ingest` is not available yet.
+
 Their settings come from environment variables; `ASTRAEA_HOME` defaults to `/var/lib/astraea`:
 
 | Variable | Default | Meaning |
