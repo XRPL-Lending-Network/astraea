@@ -3,6 +3,7 @@
 ## 0.5.5
 
 - `AGENTS.md` tells coding agents how to build, check and change the project, and defers to `CONTRIBUTING.md` and `SECURITY.md`. No code or answer changes.
+- A cold block part that was evicted from the cache and read again no longer repeats work the first read already did. The cache remembers which parts matched their seal and the transaction hashes of checked blocks, up to 8 MiB, so rebuilding a part doesn't hash its stored bytes against the seal again or recompute the transaction hashes. This relies on a segment file not changing in place while the server has it open; segments are always rewritten through a new file. On one mainnet ledger, rebuilding its evicted parts went from a median of 454 to 322 ms (seven runs each, alternating, on a development machine; not yet measured on a production server). A part that doesn't match its seal is still refused on every read.
 
 ## 0.5.0
 
