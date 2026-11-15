@@ -1009,7 +1009,10 @@ impl Cold {
             .collect();
         let read = |(seg, o, seqs): &Group| -> Res<Vec<(u32, Ledger)>> {
             seqs.iter()
-                .map(|&seq| Ok((seq, read(seg, o, seq)?)))
+                .map(|&seq| {
+                    crate::limits::check()?;
+                    Ok((seq, read(seg, o, seq)?))
+                })
                 .collect()
         };
         let mut out = HashMap::with_capacity(seqs.len());
@@ -1019,11 +1022,14 @@ impl Cold {
             }
             return Ok(out);
         }
+        // Readers run under the request's deadline, which is per thread.
+        let deadline = crate::limits::current();
         let next = std::sync::atomic::AtomicUsize::new(0);
         let parts = std::thread::scope(|sc| {
             let workers: Vec<_> = (0..COLD_READERS.min(groups.len()))
                 .map(|_| {
                     sc.spawn(|| -> Res<Vec<(u32, Ledger)>> {
+                        let _deadline = crate::limits::start_at(deadline);
                         let mut got = Vec::new();
                         loop {
                             let k = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1434,6 +1440,24 @@ pub(crate) mod tests {
         }
         assert!(cold.open_count() <= 2);
         assert!(cold.ledgers(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn readers_keep_the_request_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let small = BlockLimit {
+            ledgers: 3,
+            raw: 1 << 20,
+            ..BlockLimit::default()
+        };
+        for f in [100u32, 120, 140] {
+            write_with(dir.path(), &chain(f, 12), Kinds::Explicit, small).unwrap();
+        }
+        let seqs: Vec<u32> = (100..112).chain(120..132).chain(140..152).collect();
+        let cold = Cold::open(dir.path()).unwrap();
+        assert_eq!(cold.ledgers(&seqs).unwrap().len(), seqs.len());
+        let _d = crate::limits::start(std::time::Duration::ZERO);
+        assert_eq!(cold.ledgers(&seqs).unwrap_err(), crate::limits::EXCEEDED);
     }
 
     #[test]

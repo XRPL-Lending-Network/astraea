@@ -7,6 +7,8 @@
 //! loops whose length the client controls (owner directory pages, cold index
 //! partitions, the transactions of a page or a ledger) call `check`. Past the
 //! deadline the request ends with `tooBusy` and its slot goes to the next one.
+//! Threads that read for a request (`cold::Cold::ledgers`) take its deadline
+//! with them (`current`, `start_at`).
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -35,6 +37,19 @@ impl Drop for Deadline {
 /// Starts the limit for the request about to run on this thread.
 pub fn start(limit: Duration) -> Deadline {
     DEADLINE.with(|d| d.set(Some(Instant::now() + limit)));
+    Deadline(())
+}
+
+/// The deadline of the current thread's request, to hand to threads that
+/// read for it.
+pub fn current() -> Option<Instant> {
+    DEADLINE.with(Cell::get)
+}
+
+/// Runs this thread under a deadline taken from another (`current`); `None`
+/// sets none.
+pub fn start_at(at: Option<Instant>) -> Deadline {
+    DEADLINE.with(|d| d.set(at));
     Deadline(())
 }
 
@@ -76,5 +91,22 @@ mod tests {
         assert!(check().is_ok());
         let _d = start(Duration::from_secs(60));
         assert!(check().is_ok());
+    }
+
+    #[test]
+    fn a_deadline_carries_to_another_thread() {
+        let _d = start(Duration::ZERO);
+        let at = current();
+        assert!(at.is_some());
+        std::thread::spawn(move || {
+            assert!(check().is_ok());
+            {
+                let _d = start_at(at);
+                assert_eq!(check(), Err(EXCEEDED.to_string()));
+            }
+            assert!(check().is_ok());
+        })
+        .join()
+        .unwrap();
     }
 }

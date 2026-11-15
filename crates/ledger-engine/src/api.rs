@@ -711,9 +711,14 @@ impl Engine {
                         ),
                     ));
                 }
-                let l = self
-                    .ledger(seq)
-                    .map_err(|_| rpc_err("txnNotFound", 29, "Transaction not found."))?;
+                // A request out of time is not a missing transaction.
+                let l = self.ledger(seq).map_err(|e| {
+                    if e.error == "tooBusy" {
+                        e
+                    } else {
+                        rpc_err("txnNotFound", 29, "Transaction not found.")
+                    }
+                })?;
                 let pos = l
                     .transactions
                     .iter()
