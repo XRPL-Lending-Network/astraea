@@ -24,7 +24,7 @@ The directory and package names differ for one crate. `-p` takes the package nam
 
 Also: `docs/` for the API, architecture, evidence format, metrics and operations; `scripts/` for loading full history and comparing with Clio against live services; `tools/readme-art.py` for the graphics in `assets/`.
 
-Read `docs/architecture.md` before changing how data is loaded, stored or confirmed.
+Read `docs/architecture.md` and the pages it points to (`docs/loader.md`, `docs/storage.md`, `docs/proof.md`) before changing how data is loaded, stored or confirmed.
 
 ## Commands
 
@@ -93,7 +93,11 @@ These choices are hard to undo once servers and clients depend on them. For a ne
 | A command-line flag or an operating procedure | `docs/running.md` |
 | A metric | `docs/metrics.md` |
 | The evidence package | `docs/evidence-format.md` |
-| Storage or data flow | `docs/architecture.md` |
+| Loading, storage or data flow | `docs/loader.md`, `docs/storage.md` (and `docs/architecture.md` if the overview changes) |
+| Validations, quorum or proofs | `docs/proof.md` |
+| Request handling or a new method's plumbing | `docs/rpc.md`, `docs/web-server.md` |
+| A maintenance command | `docs/tools.md` |
+| The documentation site | `scripts/docs-site.py`, `docs/site/` |
 | Comparison results against Clio | `docs/compared-with-clio.md` |
 
 ## Tests

@@ -28,9 +28,10 @@
 | `astraea_api_request_duration_seconds{method}` | histogram | time to answer |
 | `astraea_api_response_bytes_total{method}` | counter | bytes of responses |
 | `astraea_api_forwarded_total{method}` | counter | requests the node answered rather than our own data |
-| `astraea_api_inflight{pool}` | gauge | requests being served now: `api` (32 slots) and `proof` (4 slots, refused with `tooBusy` when full) |
+| `astraea_api_inflight{pool}` | gauge | requests being served now: `api` (32 slots), `proof` (4 slots, refused with `tooBusy` when full) and `forward` (16 slots) on `--api-addr`; `public_api`, `public_proof` and `public_forward` on the public listeners, sized by the `--public-max-*` flags |
+| `astraea_api_public_sessions` | gauge | WebSocket sessions open on the public listeners |
 | `astraea_api_ws_sessions`, `_ws_sessions_total` | gauge, counter | WebSocket sessions open, and opened since start |
-| `astraea_api_subscribers{stream}` | gauge | sessions subscribed to `ledger`, `transactions`, or to at least one account (`accounts`) |
+| `astraea_api_subscribers{stream}` | gauge | sessions subscribed to `ledger`, `transactions`, `book_changes`, `validations`, `manifests`, or to at least one account (`accounts`) |
 | `astraea_api_subscribed_accounts` | gauge | accounts subscribed to, over all sessions |
 | `astraea_api_ws_dropped_total` | counter | sessions disconnected for not reading their messages |
 
