@@ -24,7 +24,7 @@ There are two entry points in `server.rs`, one per transport.
 - HTTP: `http_rpc` takes `POST /` with `{"method": ..., "params": [{...}]}`. A body that is not a JSON object gets status 400 and a plain text message. `params_of` takes the first element of `params`; a missing, null or empty `params` gives an empty object, and anything that is not an object gives `badSyntax`. An empty `method` gives `unknownCmd`.
 - WebSocket: `ws_answer` handles one text message. The method is `command`, or `method` if there is no `command`. The params are the whole message without `command`, `method` and `id`. A message that is not a JSON object gets `badSyntax`.
 
-Both then ask `Guard::request` whether the client is within its budget, with a weight from `guard::weight`. Over it, the client gets `slowDown`. On WebSocket, `subscribe` and `unsubscribe` go to `subscription`, which uses `subs::parse` and the `Hub`. Over HTTP there is no such branch, so they end in `unknownCmd`.
+Both then ask `Guard::request` whether the client is within its budget, with a weight from `guard::weight`. A client over its budget gets `slowDown`. On WebSocket, `subscribe` and `unsubscribe` go to `subscription`, which uses `subs::parse` and the `Hub`. Over HTTP there is no such branch, so they end in `unknownCmd`.
 
 Everything else goes to `call`. It decides, in this order:
 
@@ -59,7 +59,7 @@ Astraea serves only validated ledgers. Requests it can't answer from validated d
 - a method in `CURRENT_ON_NODE` asked with `ledger_index` of `"current"` or `"closed"`;
 - `account_info` or `ledger` with `"queue": true`.
 
-`CURRENT_ON_NODE` is an allowlist on purpose. Without it, `ledger_index: "current"` would pass any method to the node, admin ones included. Methods in `CLIO_ONLY` (for example `nft_history` and `mpt_holders`) are never forwarded, as Clio always serves them itself. The user-facing list is in [API](api.md).
+`CURRENT_ON_NODE` is an allowlist on purpose. Without it, `ledger_index: "current"` would pass any method to the node, admin ones included. Methods in `CLIO_ONLY` (for example `nft_history` and `mpt_holders`) are never forwarded, because Clio always serves them itself. The user-facing list is in [API](api.md).
 
 `Forwarder::forward` sends the method and params to the nodes as JSON-RPC and returns the node's `result` as it is, including a node's own error. Nodes are tried in turn, a node that just failed last, within `TOTAL_LIMIT` (8 seconds) over all of them. Identical requests within `CACHE_FOR` (250 ms) get the cached answer. When all nodes fail, the answer is `failedToForward` (code 90), and for the next `DOWN_FOR` (5 seconds) it is given at once. `Forwarder::send_transaction` handles `submit`: never cached, and sent to another node only when the first can't have received it.
 
@@ -89,7 +89,7 @@ The names and codes follow Clio. The common ones are below; handlers build more 
 
 ## Limits a handler runs under
 
-A handler runs on a blocking thread, which can't be stopped from outside. So it stops itself. `limits::start` sets a deadline on the thread: `REQUEST_LIMIT` (10 seconds), or `PUBLIC_REQUEST_LIMIT` (5 seconds) on a public listener. A loop whose length the client controls calls `limits::check_rpc()` (or `limits::check()` where errors are strings). Past the deadline the request ends with `tooBusy`, and `api::internal` turns the string error `limits::EXCEEDED` back into `tooBusy`. Threads that read for a request take its deadline with `limits::current` and `limits::start_at`.
+A handler runs on a blocking thread, which can't be stopped from outside, so it stops itself: `limits::start` sets a deadline on the thread: `REQUEST_LIMIT` (10 seconds), or `PUBLIC_REQUEST_LIMIT` (5 seconds) on a public listener. A loop whose length the client controls calls `limits::check_rpc()` (or `limits::check()` where errors are strings). Past the deadline the request ends with `tooBusy`, and `api::internal` turns the string error `limits::EXCEEDED` back into `tooBusy`. Threads that read for a request take its deadline with `limits::current` and `limits::start_at`.
 
 The request also needs a slot. Local requests share `MAX_INFLIGHT` (32) slots, forwarded ones `MAX_FORWARDS` (16). `proof_*` methods have their own `MAX_PROOFS` (4) and don't queue: when those are taken, the answer is `tooBusy` at once. Proofs for a transaction or a fixed ledger are cached. Each request also counts against the client's budget in `guard` by `guard::weight`; the weights are listed on [Web server](web-server.md).
 

@@ -72,7 +72,7 @@ A request over WebSocket is counted against the client's budget like an HTTP one
 
 ## Protection of the public door
 
-The public door is for strangers. Per-client limits alone don't protect your services, since many addresses each within budget can still fill every slot. So the public door has the following, on top of its own smaller pools.
+The public door is for strangers. Per-client limits alone don't protect your services, since many addresses each within budget can still fill every slot. On top of its own smaller pools, the public door has these protections:
 
 - **Stepping aside.** When the own door has fewer than 8 free read slots, every public request that needs a slot gets `tooBusy` at once. This protects the own door's queue, not the machine: disk and CPU stay shared.
 - **Per-client limits are required.** `astraea-ingest` refuses to start with `--public-api-addr` unless at least one of `--max-requests`, `--max-response-bytes` or `--max-connections` is set. With a public door these limits apply to it alone, and the own door has none.

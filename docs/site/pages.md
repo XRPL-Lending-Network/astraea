@@ -1,7 +1,5 @@
 # Related Pages
 
-Here is a list of all related documentation pages.
-
 ## Subsystems
 
 | Page | What it covers |
