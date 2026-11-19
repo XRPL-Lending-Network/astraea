@@ -6,6 +6,10 @@ Astraea is a history server for the XRP Ledger. It speaks the same JSON-RPC and 
 
 Version 0.5 is the first stable release. Astraea answers everything Clio answers, over the full history.
 
+## Documentation
+
+The documentation site is at **[xrpl-lending-network.github.io/astraea](https://xrpl-lending-network.github.io/astraea/)**: the API, running a server, the subsystems, and a reference for the code. It is built from `docs/` on every push to `main`.
+
 ## Public endpoint
 
 A public endpoint run by the maintainers is coming soon, and its address will be published here. Until then, you can run a server of your own: see [docs/running.md](docs/running.md).
