@@ -474,6 +474,7 @@ impl Engine {
             "account_lines" => self.account_lines(p),
             "account_offers" => self.account_offers(p),
             "mpt_holders" => self.mpt_holders(p),
+            "vault_info" => self.vault_info(p),
             "account_nfts" => self.account_nfts(p),
             "nft_buy_offers" => self.nft_buy_offers(p),
             "nft_sell_offers" => self.nft_sell_offers(p),
@@ -1126,6 +1127,94 @@ impl Engine {
             m.insert("node".into(), Value::Object(node));
         }
         m.insert("validated".into(), json!(true));
+        Ok(m)
+    }
+
+    /// vault_info as in Clio 2.8/2.9 (`VaultInfo.cpp`): the Vault object, found
+    /// by `vault_id` or by `owner` and `seq`, with its share issuance under
+    /// `shares`. Field checks come first, in Clio's order, then the choice of
+    /// selector, then the ledger.
+    fn vault_info(&self, p: &Map<String, Value>) -> Res<Map<String, Value>> {
+        let malformed = || rpc_err("malformedRequest", 5001, "Malformed request.");
+        let present = |k: &str| p.get(k).filter(|v| !v.is_null());
+        let vault_id = present("vault_id")
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| s.len() == 64)
+                    .and_then(|s| hex::decode(s).ok())
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    .ok_or_else(malformed)
+            })
+            .transpose()?;
+        let owner = present("owner")
+            .map(|v| {
+                v.as_str()
+                    .and_then(decode_account)
+                    .ok_or_else(|| rpc_err("malformedRequest", 5001, "OwnerNotHexString"))
+            })
+            .transpose()?;
+        let seq = present("seq")
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(malformed)
+            })
+            .transpose()?;
+        if let Some(v) = present("ledger_index")
+            && v.as_str() != Some("validated")
+            && as_u32(v).is_none()
+        {
+            return Err(invalid_params("ledgerIndexMalformed"));
+        }
+        let by_owner = match (vault_id, owner, seq) {
+            (Some(_), None, None) => None,
+            (None, Some(o), Some(s)) => Some((o, s)),
+            _ => return Err(malformed()),
+        };
+        let seq_l = self.resolve_old_state(p)?;
+        let entry_not_found = |m: &str| rpc_err("entryNotFound", 98, m);
+        let key = match (vault_id, by_owner) {
+            (Some(k), _) => k,
+            (None, Some((o, s))) => {
+                if self
+                    .state
+                    .get(&keylet(b'a', &[&o]), seq_l)
+                    .map_err(internal)?
+                    .is_none()
+                {
+                    return Err(entry_not_found("Entry not found."));
+                }
+                keylet(b'V', &[&o, &s.to_be_bytes()])
+            }
+            (None, None) => unreachable!("checked above"),
+        };
+        let data = self
+            .state
+            .get(&key, seq_l)
+            .map_err(internal)?
+            .ok_or_else(|| entry_not_found("vault object not found."))?;
+        let mut vault = xrpl_json::ledger_entry(&key, &data).map_err(internal)?;
+        if vault.get("LedgerEntryType").and_then(Value::as_str) != Some("Vault") {
+            return Err(entry_not_found("vault object not found."));
+        }
+        let mpt: [u8; 24] = vault
+            .get("ShareMPTID")
+            .and_then(Value::as_str)
+            .and_then(|s| hex::decode(s).ok())
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| entry_not_found("issuance object not found."))?;
+        let ikey = keylet(b'~', &[&mpt]);
+        let idata = self
+            .state
+            .get(&ikey, seq_l)
+            .map_err(internal)?
+            .ok_or_else(|| entry_not_found("issuance object not found."))?;
+        let shares = xrpl_json::ledger_entry(&ikey, &idata).map_err(internal)?;
+        vault.insert("shares".into(), Value::Object(shares));
+        let mut m = Map::new();
+        m.insert("ledger_index".into(), json!(seq_l));
+        m.insert("validated".into(), json!(true));
+        m.insert("vault".into(), Value::Object(vault));
         Ok(m)
     }
 

@@ -216,7 +216,7 @@ fn slow_down_http() -> Response {
 }
 
 /// Methods whose answer depends only on the ledger asked for.
-const FIXED_BY_LEDGER: [&str; 18] = [
+const FIXED_BY_LEDGER: [&str; 19] = [
     "account_info",
     "account_lines",
     "account_nfts",
@@ -235,6 +235,7 @@ const FIXED_BY_LEDGER: [&str; 18] = [
     "nfts_by_issuer",
     "proof_entry",
     "proof_ledger",
+    "vault_info",
 ];
 
 /// Whether a successful answer of our own can never change: about a

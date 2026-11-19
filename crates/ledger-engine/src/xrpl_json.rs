@@ -487,13 +487,29 @@ pub fn transaction(tx: &[u8]) -> Result<Map<String, Value>, String> {
     Ok(m)
 }
 
-/// State object: fields and `index`, as in `STLedgerEntry::getJson`.
+/// State object: fields and `index`, as in `STLedgerEntry::getJson`, which
+/// also adds `mpt_issuance_id` (sequence and issuer) to an MPTokenIssuance.
 pub fn ledger_entry(key: &[u8; 32], data: &[u8]) -> Result<Map<String, Value>, String> {
     let Value::Object(mut m) = object(definitions(), data)? else {
         return Err("state object is not an object".into());
     };
     m.insert("index".into(), json!(hex_upper(key)));
+    if m.get("LedgerEntryType").and_then(Value::as_str) == Some("MPTokenIssuance")
+        && let Some(id) = mpt_issuance_id(&m)
+    {
+        m.insert("mpt_issuance_id".into(), json!(id));
+    }
     Ok(m)
+}
+
+fn mpt_issuance_id(m: &Map<String, Value>) -> Option<String> {
+    let seq = u32::try_from(m.get("Sequence")?.as_u64()?).ok()?;
+    let (0, issuer) = witness_core::keys::decode_base58(m.get("Issuer")?.as_str()?)? else {
+        return None;
+    };
+    let mut id = seq.to_be_bytes().to_vec();
+    id.extend(issuer);
+    Some(hex_upper(&id))
 }
 
 pub fn metadata(meta: &[u8]) -> Result<Map<String, Value>, String> {
