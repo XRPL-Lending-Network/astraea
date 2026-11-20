@@ -378,3 +378,31 @@ fn server_info_shows_boundary() {
         "{info}"
     );
 }
+
+#[test]
+fn public_requests_do_not_read_old_state() {
+    let f = fixture();
+    let dir = tempfile::tempdir().unwrap();
+    let a = server_a(dir.path(), &f);
+    {
+        let _public = ledger_engine::limits::start_public(std::time::Duration::from_secs(60));
+        for (method, p) in requests(&f, 1050) {
+            assert_eq!(
+                answer(&a, method, &p)["error"],
+                "lgrNotFound",
+                "{method} {p:?}"
+            );
+        }
+        let info = answer(&a, "server_info", &Map::new());
+        assert!(
+            info["info"]["astraea"].get("old_state_ledgers").is_none(),
+            "{info}"
+        );
+        // The snapshot's own ledgers are still served.
+        let (method, p) = &requests(&f, SNAPSHOT_A)[0];
+        assert!(answer(&a, method, p).get("error").is_none());
+    }
+    // The thread forgets it with the request: the next one reads old state again.
+    let (method, p) = &requests(&f, 1050)[0];
+    assert!(answer(&a, method, p).get("error").is_none());
+}

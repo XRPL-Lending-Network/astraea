@@ -17,6 +17,7 @@ use crate::api::{RpcError, rpc_err};
 
 thread_local! {
     static DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static NO_OLD_STATE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The error text that carries an exceeded limit through modules whose errors
@@ -31,6 +32,7 @@ pub struct Deadline(());
 impl Drop for Deadline {
     fn drop(&mut self) {
         DEADLINE.with(|d| d.set(None));
+        NO_OLD_STATE.with(|d| d.set(false));
     }
 }
 
@@ -38,6 +40,21 @@ impl Drop for Deadline {
 pub fn start(limit: Duration) -> Deadline {
     DEADLINE.with(|d| d.set(Some(Instant::now() + limit)));
     Deadline(())
+}
+
+/// `start` for a request from a public listener. Such a request also does not
+/// read state before the snapshot: a read there decompresses cold blocks, and
+/// the public budgets don't count that work yet.
+pub fn start_public(limit: Duration) -> Deadline {
+    let d = start(limit);
+    NO_OLD_STATE.with(|o| o.set(true));
+    d
+}
+
+/// Whether the current request may read state before the snapshot. Requests
+/// outside the server (tools, tests) may.
+pub fn old_state_allowed() -> bool {
+    !NO_OLD_STATE.with(Cell::get)
 }
 
 /// The deadline of the current thread's request, to hand to threads that

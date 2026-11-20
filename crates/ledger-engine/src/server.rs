@@ -459,13 +459,13 @@ async fn call_own(
     }
     let engine = s.engine.clone();
     let name = method.clone();
-    let limit = if s.public.is_some() {
-        PUBLIC_REQUEST_LIMIT
-    } else {
-        REQUEST_LIMIT
-    };
+    let public = s.public.is_some();
     let (result, spent) = tokio::task::spawn_blocking(move || {
-        let _limit = crate::limits::start(limit);
+        let _limit = if public {
+            crate::limits::start_public(PUBLIC_REQUEST_LIMIT)
+        } else {
+            crate::limits::start(REQUEST_LIMIT)
+        };
         let t = Instant::now();
         let r = engine.handle(&method, &params);
         (r, t.elapsed())

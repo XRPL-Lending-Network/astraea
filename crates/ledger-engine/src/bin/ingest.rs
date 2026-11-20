@@ -165,6 +165,12 @@ struct Args {
         "ED42AEC58B701EEBB77356FFFEC26F83C1F0407263530F068C7C73D392C7E06FD1".to_string(),
     ])]
     publishers: Vec<String>,
+    /// Version index over cold history (`astraea-state history-state-index`).
+    /// With it, account_info, ledger_entry, account_lines, account_objects and
+    /// vault_info answer for ledgers before the snapshot, within the index's
+    /// range, on --api-addr only: the public API keeps refusing them.
+    #[arg(long)]
+    old_state: Option<PathBuf>,
 }
 
 /// Writes a ledger and records it in the metrics.
@@ -601,6 +607,22 @@ async fn run(args: Args) -> Result<(), String> {
         ..Metrics::default()
     }));
     update_sizes(&args.data_dir, &metrics);
+    if let Some(dir) = &args.old_state {
+        // A damaged index is refused here rather than answered from.
+        let t = Instant::now();
+        let index = ledger_engine::coldstate::VersionIndex::open(dir)
+            .map_err(|e| format!("--old-state {}: {e}", dir.display()))?;
+        let (lo, hi) = index.range();
+        sink.state
+            .set_old_state(Arc::new(ledger_engine::state::ColdOldState {
+                index,
+                cold: ledger_engine::cold::Cold::open(&args.data_dir.join("history"))?,
+            }));
+        info!(
+            "old state attached: ledgers {lo}-{hi}, opened in {:.1} s",
+            t.elapsed().as_secs_f64()
+        );
+    }
     if let Some(addr) = args.metrics_addr {
         tokio::spawn(metrics::serve(addr, metrics.clone()));
     }

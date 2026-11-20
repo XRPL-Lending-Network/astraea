@@ -47,7 +47,7 @@ These work over the whole range, hot and cold. Paging with markers is continuous
 | `nft_info` | a token's owner, whether it is burned, and its URI at any ledger in the range |
 | `nfts_by_issuer` | an issuer's tokens by taxon and ID, each as of the ledger asked; `limit` 1 to 100 (default 50); a token minted after that ledger is left out but counts toward the page, as in Clio |
 
-State exists from the hot store's snapshot onward. A state query for an older ledger returns `lgrNotFound`.
+State exists from the hot store's snapshot onward. A state query for an older ledger returns `lgrNotFound`, unless the server was started with a version index over cold history (`--old-state`): then `account_info`, `ledger_entry`, `account_lines`, `account_objects` and `vault_info` also answer on the ledgers it covers, which `server_info` gives as `astraea.old_state_ledgers`. Other state methods, and every request to a public listener, still get `lgrNotFound` there.
 
 ### NFT index
 

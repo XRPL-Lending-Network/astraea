@@ -1625,13 +1625,19 @@ impl StateStore {
         *self.old.write().unwrap_or_else(|p| p.into_inner()) = Some(old);
     }
 
-    /// Ledgers the attached old state answers for, if one is attached.
+    /// The attached old state, unless the current request may not read it
+    /// (one from a public listener, see `limits::start_public`).
+    fn old(&self) -> Option<std::sync::Arc<dyn OldState>> {
+        if !crate::limits::old_state_allowed() {
+            return None;
+        }
+        self.old.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Ledgers the attached old state answers for, if one is attached and the
+    /// current request may read it.
     pub fn old_range(&self) -> Option<(u32, u32)> {
-        self.old
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map(|o| o.range())
+        self.old().map(|o| o.range())
     }
 
     /// Whether state as of ledger `seq` can be read: from the snapshot on, or
@@ -1652,8 +1658,7 @@ impl StateStore {
         match self.base()? {
             Some(b) if at >= b => {}
             _ => {
-                let old = self.old.read().unwrap_or_else(|p| p.into_inner()).clone();
-                if let Some(o) = old {
+                if let Some(o) = self.old() {
                     let (lo, hi) = o.range();
                     if at >= lo && at <= hi {
                         return o.version(key, at);
