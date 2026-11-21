@@ -138,6 +138,8 @@ pub struct Api {
     pub subscribed_accounts: u64,
     /// Sessions disconnected for not reading their messages.
     pub ws_dropped: u64,
+    /// Requests refused to protect the server, by (door, reason).
+    pub rejected: BTreeMap<(&'static str, &'static str), u64>,
 }
 
 impl Api {
@@ -304,6 +306,15 @@ impl Api {
             "counter",
             "WebSocket sessions disconnected for not reading their messages.",
             [(String::new(), self.ws_dropped.to_string())],
+        );
+        family(
+            out,
+            "astraea_api_rejected_total",
+            "counter",
+            "Requests refused to protect the server, by door (own, public) and reason: connections, budget (requests, bytes or work), sessions (all public sessions), busy (no free slot in time).",
+            self.rejected
+                .iter()
+                .map(|((d, r), n)| (format!("door=\"{d}\",reason=\"{r}\""), n.to_string())),
         );
     }
 }

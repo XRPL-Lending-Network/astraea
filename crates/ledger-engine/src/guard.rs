@@ -32,6 +32,10 @@ pub struct GuardConfig {
     pub max_bytes: Option<u64>,
     /// Connections per client open at once.
     pub max_connections: Option<u32>,
+    /// Milliseconds of handling that count as one more request against
+    /// `max_requests`, so that a request that reads much cold history costs
+    /// more than one that is answered from the cache.
+    pub work_ms: Option<u64>,
     pub sweep: Duration,
     /// Addresses and networks that are never limited.
     pub whitelist: Vec<Net>,
@@ -225,6 +229,19 @@ impl Guard {
         self.within(u)
     }
 
+    /// Counts the time a request of `ip` took to handle against its request
+    /// budget: one more request per `work_ms`. The next request over budget
+    /// gets `slowDown`.
+    pub fn worked(&self, ip: IpAddr, spent: Duration) {
+        let Some(per) = self.config.work_ms.filter(|m| *m > 0) else {
+            return;
+        };
+        let extra = spent.as_millis() as u64 / per;
+        if extra > 0 && self.counted(ip) {
+            self.lock().entry(ip).or_default().requests += extra;
+        }
+    }
+
     /// Counts the bytes of a response sent to `ip`.
     pub fn sent(&self, ip: IpAddr, bytes: usize) {
         if self.counted(ip) {
@@ -304,6 +321,35 @@ mod tests {
         assert!(one.contains(ip("2001:db8::1")) && !one.contains(ip("2001:db8::2")));
         assert!("10.0.0.0/33".parse::<Net>().is_err());
         assert!("0.0.0.0/0".parse::<Net>().unwrap().contains(ip("8.8.8.8")));
+    }
+
+    #[test]
+    fn handling_time_counts_against_the_budget() {
+        let g = guard(GuardConfig {
+            max_requests: Some(10),
+            work_ms: Some(50),
+            whitelist: vec!["127.0.0.1".parse().unwrap()],
+            ..GuardConfig::default()
+        });
+        let a = ip("192.0.2.1");
+        assert!(g.request(a, 1));
+        // Under one unit of work costs nothing more.
+        g.worked(a, Duration::from_millis(49));
+        assert!(g.request(a, 1));
+        // 400 ms is 8 more: 2 + 8 = 10, at the limit; the next one is over.
+        g.worked(a, Duration::from_millis(400));
+        assert!(!g.request(a, 1));
+        g.worked(ip("127.0.0.1"), Duration::from_secs(60));
+        assert!(g.request(ip("127.0.0.1"), 1));
+        g.sweep();
+        assert!(g.request(a, 1));
+        // Without work_ms time is not counted.
+        let off = guard(GuardConfig {
+            max_requests: Some(2),
+            ..GuardConfig::default()
+        });
+        off.worked(a, Duration::from_secs(60));
+        assert!(off.request(a, 2));
     }
 
     #[test]

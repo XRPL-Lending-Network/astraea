@@ -109,6 +109,11 @@ struct Args {
     /// Connections per client open at once.
     #[arg(long)]
     max_connections: Option<u32>,
+    /// Milliseconds of request handling that count as one more request against
+    /// --max-requests: a request that reads much cold history costs more than
+    /// one answered from the cache. Off if not given.
+    #[arg(long)]
+    work_ms: Option<u64>,
     /// Length of the interval the request and byte budgets cover, in seconds.
     #[arg(long, default_value_t = 1)]
     sweep_secs: u64,
@@ -665,6 +670,7 @@ async fn run(args: Args) -> Result<(), String> {
             max_requests: args.max_requests,
             max_bytes: args.max_response_bytes,
             max_connections: args.max_connections,
+            work_ms: args.work_ms.filter(|m| *m > 0),
             sweep: Duration::from_secs(args.sweep_secs.max(1)),
             whitelist: args.limit_whitelist.clone(),
             trusted_proxies: args.trusted_proxies.clone(),
@@ -676,11 +682,13 @@ async fn run(args: Args) -> Result<(), String> {
         }
         if guard.enabled() {
             info!(
-                "client limits: {:?} requests, {:?} bytes per {} s, {:?} connections",
+                "client limits: {:?} requests, {:?} bytes per {} s, {:?} connections, \
+                 {:?} ms of work per request",
                 guard.max_requests,
                 guard.max_bytes,
                 guard.sweep.as_secs(),
-                guard.max_connections
+                guard.max_connections,
+                guard.work_ms
             );
         }
         let (own_limits, public) = if args.public_api_addr.is_empty() {

@@ -75,6 +75,7 @@ astraea-ingest \
 | `--max-requests` | weighted requests per client per interval; with none of the three limits, clients are not limited |
 | `--max-response-bytes` | response bytes per client per interval |
 | `--max-connections` | connections per client open at once: HTTP requests in progress and WebSocket sessions |
+| `--work-ms` | milliseconds of request handling that count as one more request against `--max-requests`; off if not given |
 | `--sweep-secs` | the interval the request and byte budgets cover, seconds (default 1) |
 | `--limit-whitelist` | addresses or CIDR networks that are never limited, comma separated |
 | `--trusted-proxies` | proxies whose `CF-Connecting-IP`, `Forwarded` or `X-Forwarded-For` header names the client, comma separated |
@@ -107,7 +108,22 @@ Without `--public-api-addr`, the limits apply to `--api-addr`.
 
 Per-client limits work like Clio's `dos_guard`. A client over its request or byte budget, or at its connection cap, gets `slowDown` until the interval ends: over HTTP as status 503, over WebSocket as an error response. Requests that walk many objects count more: a proof 10, `ledger_data` and a ledger with expanded transactions 5, forwarded requests 3, `account_tx`, `nft_history`, `book_changes` and `nfts_by_issuer` 2, the rest 1. Addresses that must never be limited go in `--limit-whitelist`.
 
+Weights are a guess made before the request runs; with `--work-ms` the request is also charged for what it actually cost. Every `--work-ms` milliseconds a request spent being handled count as one more request against the client's budget, so a request that reads much cold history costs more than one answered from the cache, whatever its method. With `--max-requests 100 --sweep-secs 10 --work-ms 50`, a client gets about 5 seconds of handling every 10 seconds. The charge comes after the request, so the request that crosses the budget is answered and the next one gets `slowDown`.
+
+Refusals are counted in `astraea_api_rejected_total` by door and reason: `connections` (at the client's cap), `budget` (over its requests, bytes or work), `sessions` (all public WebSocket sessions taken) and `busy` (no free slot in time, `tooBusy`). A rise of `door="own"` means your own services are being turned away and is worth an alert.
+
 Behind a proxy every request comes from the proxy's address. List the proxy in `--trusted-proxies` (for `cloudflared` on the same host, `127.0.0.1`), and the client is taken from `CF-Connecting-IP`, the last `for=` of `Forwarded`, or the first address of `X-Forwarded-For`. These headers are ignored from anyone else, so a client can't pose as another.
+
+#### Behind a Cloudflare Tunnel
+
+A tunnel needs no open port and gives TLS (HTTPS and WSS) with certificates Cloudflare renews:
+
+1. Keep `--public-api-addr` on a loopback address, for example `127.0.0.1:51301`, and set `--trusted-proxies 127.0.0.1`.
+2. Create a tunnel whose ingress sends your hostname to `http://127.0.0.1:51301` and everything else to `http_status:404`, and run `cloudflared tunnel run --token-file <file>` as its own user, with `--no-autoupdate`.
+3. Until you open the service, put the hostname behind Cloudflare Access and set `originRequest.access.required` with the application's audience tag, so `cloudflared` itself refuses requests without a valid Access token.
+4. To open it, remove the Access application (or give it a bypass policy) and the origin check. Rate rules at the edge are a sensible addition: Cloudflare sees floods that never reach the machine.
+
+The tunnel adds `CF-Connecting-IP`, so the per-client limits and `astraea_api_rejected_total` see real clients.
 
 Answers that can never change (a transaction, or anything about a ledger named by sequence or hash) carry `Cache-Control: public, max-age=86400, immutable`; the rest carry `no-store`. JSON-RPC requests are POSTs, which CDNs don't cache by default, so an edge cache needs a rule or worker that keys on the request body; the header tells it what it may keep.
 

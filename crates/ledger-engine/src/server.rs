@@ -270,6 +270,9 @@ fn record(
     bytes: usize,
 ) {
     let status = status_of(result);
+    if status == "tooBusy" {
+        reject(s, "busy");
+    }
     let known = !matches!(status.as_str(), "unknownCmd" | "badSyntax")
         && (1..=40).contains(&method.len())
         && method.bytes().all(|b| b.is_ascii_lowercase() || b == b'_');
@@ -283,6 +286,18 @@ fn record(
         bytes,
         forwarded,
     );
+}
+
+/// Counts a request refused to protect the server: over the client's
+/// connections or budget, at the cap of public sessions, or without a free
+/// slot in time (`busy`).
+fn reject(s: &Shared, reason: &'static str) {
+    let door = if s.public.is_some() { "public" } else { "own" };
+    *lock(&s.metrics)
+        .api
+        .rejected
+        .entry((door, reason))
+        .or_default() += 1;
 }
 
 /// `success`, or the error name the client sees.
@@ -343,7 +358,12 @@ enum Reply {
     Forwarded(Map<String, Value>),
 }
 
-async fn call(s: &Shared, method: String, params: Map<String, Value>) -> Result<Reply, RpcError> {
+async fn call(
+    s: &Shared,
+    client: std::net::IpAddr,
+    method: String,
+    params: Map<String, Value>,
+) -> Result<Reply, RpcError> {
     if s.public.is_some() && NOT_PUBLIC.contains(&method.as_str()) {
         return Err(RpcError {
             error: "notSupported",
@@ -379,7 +399,7 @@ async fn call(s: &Shared, method: String, params: Map<String, Value>) -> Result<
             .map(Reply::Forwarded);
     }
     let info = method == "server_info";
-    let mut r = call_own(s, method, params).await?;
+    let mut r = call_own(s, client, method, params).await?;
     // Fee multiplier and version come from the node, as in Clio; if the node is
     // unavailable, our own response stays. The node's answer is refreshed in the
     // background, so this never waits for the node.
@@ -391,6 +411,7 @@ async fn call(s: &Shared, method: String, params: Map<String, Value>) -> Result<
 
 async fn call_own(
     s: &Shared,
+    client: std::net::IpAddr,
     method: String,
     params: Map<String, Value>,
 ) -> Result<Map<String, Value>, RpcError> {
@@ -436,12 +457,15 @@ async fn call_own(
     } else {
         REQUEST_LIMIT
     };
-    let result = tokio::task::spawn_blocking(move || {
+    let (result, spent) = tokio::task::spawn_blocking(move || {
         let _limit = crate::limits::start(limit);
-        engine.handle(&method, &params)
+        let t = Instant::now();
+        let r = engine.handle(&method, &params);
+        (r, t.elapsed())
     })
     .await
-    .unwrap_or_else(|e| Err(internal(e)));
+    .unwrap_or_else(|e| (Err(internal(e)), std::time::Duration::ZERO));
+    s.guard.worked(client, spent);
     if is_proof
         && let Ok(r) = &result
         && let Some(by) = r
@@ -472,6 +496,7 @@ async fn http_rpc(
     let transport = s.transport("http", "public_http");
     let client = s.guard.client(peer.ip(), &headers);
     let Some(_connection) = s.guard.connect(client) else {
+        reject(&s, "connections");
         record(&s, transport, "", &Err(slow_down()), Instant::now(), 0);
         return slow_down_http();
     };
@@ -495,11 +520,12 @@ async fn http_rpc(
     if let Ok(p) = &params
         && !s.guard.request(client, weight(&method, p))
     {
+        reject(&s, "budget");
         record(&s, transport, &method, &Err(slow_down()), started, 0);
         return slow_down_http();
     }
     let result = match &params {
-        Ok(p) if !method.is_empty() => call(&s, method.clone(), p.clone()).await,
+        Ok(p) if !method.is_empty() => call(&s, client, method.clone(), p.clone()).await,
         Ok(_) => Err(unknown_method()),
         Err(e) => Err(e.clone()),
     };
@@ -544,6 +570,7 @@ async fn ws_upgrade(
     let transport = s.transport("ws", "public_ws");
     let client = s.guard.client(peer.ip(), &headers);
     if s.guard.connect(client).is_none() {
+        reject(&s, "connections");
         record(&s, transport, "", &Err(slow_down()), Instant::now(), 0);
         return slow_down_http();
     }
@@ -552,6 +579,7 @@ async fn ws_upgrade(
         Some(p) => match p.sessions.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
+                reject(&s, "sessions");
                 record(&s, transport, "", &Err(slow_down()), Instant::now(), 0);
                 return slow_down_http();
             }
@@ -680,11 +708,12 @@ async fn ws_answer(s: &Shared, id: u64, text: &str, client: std::net::IpAddr) ->
         params.remove(k);
     }
     let result = if !s.guard.request(client, weight(&method, &params)) {
+        reject(s, "budget");
         Err(slow_down())
     } else if method == "subscribe" || method == "unsubscribe" {
         subscription(s, id, &method, &params).await
     } else {
-        call(s, method.clone(), params).await
+        call(s, client, method.clone(), params).await
     };
     let mut m = match &result {
         Ok(r) => {
@@ -738,6 +767,7 @@ async fn health(
 ) -> Response {
     let client = s.guard.client(peer.ip(), &headers);
     if !s.guard.request(client, 1) {
+        reject(&s, "budget");
         return slow_down_http();
     }
     let engine = s.engine.clone();

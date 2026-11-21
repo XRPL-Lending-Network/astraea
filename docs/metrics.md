@@ -34,6 +34,7 @@
 | `astraea_api_subscribers{stream}` | gauge | sessions subscribed to `ledger`, `transactions`, `book_changes`, `validations`, `manifests`, or to at least one account (`accounts`) |
 | `astraea_api_subscribed_accounts` | gauge | accounts subscribed to, over all sessions |
 | `astraea_api_ws_dropped_total` | counter | sessions disconnected for not reading their messages |
+| `astraea_api_rejected_total{door,reason}` | counter | requests refused to protect the server; `door` is `own` or `public`, `reason` is `connections`, `budget`, `sessions` or `busy` |
 
 Method names a client made up are counted as `other`, so the series stay few.
 
