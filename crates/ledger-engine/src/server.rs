@@ -393,10 +393,17 @@ async fn call(
             return Err(unknown_method());
         };
         let _permit = s.slot(&s.forwards).await?;
-        return tokio::task::spawn_blocking(move || f.forward(&method, &params))
-            .await
-            .unwrap_or_else(|e| Err(internal(e)))
-            .map(Reply::Forwarded);
+        let public = s.public.is_some();
+        return tokio::task::spawn_blocking(move || {
+            let mut r = f.forward(&method, &params)?;
+            if public {
+                crate::forward::hide_node(&method, &mut r);
+            }
+            Ok(r)
+        })
+        .await
+        .unwrap_or_else(|e| Err(internal(e)))
+        .map(Reply::Forwarded);
     }
     let info = method == "server_info";
     let mut r = call_own(s, client, method, params).await?;

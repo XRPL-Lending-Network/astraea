@@ -140,6 +140,25 @@ pub fn node_info(result: &mut Map<String, Value>, node: &Map<String, Value>) {
     }
 }
 
+/// Fields of a node's `server_state` (and `server_info`) that describe the node
+/// itself rather than the network: its peer key, listening ports and host name.
+/// A public listener leaves them out.
+const NODE_IDENTITY: [&str; 3] = ["pubkey_node", "ports", "hostid"];
+
+/// Leaves the node's own fields out of a forwarded node-state reply.
+pub fn hide_node(method: &str, result: &mut Map<String, Value>) {
+    let key = match method {
+        "server_state" => "state",
+        "server_info" => "info",
+        _ => return,
+    };
+    if let Some(Value::Object(m)) = result.get_mut(key) {
+        for f in NODE_IDENTITY {
+            m.remove(f);
+        }
+    }
+}
+
 /// How long a node response stays cached: `forwarding.cache_timeout` in Clio.
 const CACHE_FOR: Duration = Duration::from_millis(250);
 /// Maximum number of cached responses; the key is the method and params.
@@ -413,6 +432,28 @@ impl Forwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_listener_trims_node_state() {
+        let mut r = json!({"state": {
+            "pubkey_node": "n9M8", "ports": [{"port": "51235"}], "hostid": "HOST",
+            "build_version": "3.4.1", "server_state": "full"
+        }})
+        .as_object()
+        .cloned()
+        .unwrap();
+        hide_node("server_state", &mut r);
+        assert_eq!(
+            Value::Object(r),
+            json!({"state": {"build_version": "3.4.1", "server_state": "full"}})
+        );
+        let mut fee = json!({"drops": {"base_fee": "10"}, "ports": 1})
+            .as_object()
+            .cloned()
+            .unwrap();
+        hide_node("fee", &mut fee);
+        assert!(fee.contains_key("ports"));
+    }
 
     #[test]
     fn forwarding_follows_clio_rule() {
