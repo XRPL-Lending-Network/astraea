@@ -12,7 +12,20 @@ The documentation site is at **[xrpl-lending-network.github.io/astraea](https://
 
 ## Public endpoint
 
-A public endpoint run by the maintainers is coming soon, and its address will be published here. Until then, you can run a server of your own: see [docs/running.md](docs/running.md).
+The maintainers run a public mainnet endpoint, with the full history:
+
+| | |
+|---|---|
+| JSON-RPC | `https://astraea.xrpl-lending.network/` |
+| WebSocket | `wss://astraea.xrpl-lending.network/` |
+| Health | `https://astraea.xrpl-lending.network/health` |
+
+```bash
+curl -s https://astraea.xrpl-lending.network/ \
+  -d '{"method":"server_info","params":[{}]}'
+```
+
+It is free and needs no key. Each client has a budget of requests, response bytes and handling time per 10 seconds; past it the answer is `slowDown` (HTTP 503) until the interval ends. Requests to submit or sign transactions are not accepted. For heavy or steady use, run a server of your own: see [docs/running.md](docs/running.md).
 
 ## Why another history server
 
