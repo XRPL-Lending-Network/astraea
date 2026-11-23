@@ -25,7 +25,36 @@ curl -s https://astraea.xrpl-lending.network/ \
   -d '{"method":"server_info","params":[{}]}'
 ```
 
-It is free and needs no key. Each client has a budget of requests, response bytes and handling time per 10 seconds; past it the answer is `slowDown` (HTTP 503) until the interval ends. Requests to submit or sign transactions are not accepted. For heavy or steady use, run a server of your own: see [docs/running.md](docs/running.md).
+It is free and needs no key. Requests to submit or sign transactions are not accepted.
+
+### Limits
+
+Limits are counted per client address, over a window of 10 seconds. When a client goes over any of them, it gets `slowDown` until the window ends: HTTP status 503 over JSON-RPC, an error response over WebSocket. Nothing else happens: no ban, and the next window starts clean.
+
+| Limit | Value |
+|---|---|
+| Request budget | 100 units per 10 seconds |
+| Response size | 50 MB per 10 seconds |
+| Handling time | every 50 ms a request spends being handled costs one more unit, so about 5 seconds of server time per 10 seconds |
+| Open connections | 10 per client |
+| One request | at most 5 seconds of handling, and at most 256 KiB in size |
+| WebSocket | up to 100 accounts in one session's subscriptions |
+
+Requests cost different amounts, because some read much more than others:
+
+| Request | Units |
+|---|---|
+| `proof_ledger`, `proof_tx`, `proof_entry` | 10 |
+| `ledger_data`, `ledger` with `transactions` and `expand` | 5 |
+| Methods answered by a node (`fee`, `server_state`, `ledger_current`, `server_definitions`, and queries for the `current` or `closed` ledger) | 3 |
+| `account_tx`, `nft_history`, `book_changes`, `nfts_by_issuer` | 2 |
+| Everything else | 1 |
+
+A request that reads a lot of old history therefore costs more than its method alone suggests. Pages are capped, for example at most 1000 transactions in one `account_tx` page; use the returned `marker` to read further.
+
+The server also protects itself as a whole: when it is short of free slots, public requests get `tooBusy` and should be retried a little later. A good client keeps one WebSocket connection open instead of opening a new one per request, pages with `marker`, and backs off on `slowDown` or `tooBusy`.
+
+For heavy or steady use, run a server of your own: see [docs/running.md](docs/running.md).
 
 ## Why another history server
 
