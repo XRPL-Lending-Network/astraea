@@ -136,7 +136,7 @@ Running a node of your own is covered in [docs/running.md](docs/running.md). The
 
 ## Status and plans
 
-Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs; 0.4 made the history smaller and removed research code that was never part of the server; 0.5 added separate listeners for public clients and is the first stable release. What comes next is in [ROADMAP.md](ROADMAP.md).
+Version 0.1 covered what a Clio replacement needs plus proofs; 0.2 extended proofs to all of history; 0.3 completed Clio's surface and added what a public server needs; 0.4 made the history smaller and removed research code that was never part of the server; 0.5 added separate listeners for public clients and is the first stable release; 0.5.5 answers state queries on older ledgers from a version index, charges public clients for the handling time they use, and comes with a documentation site and a public endpoint. What comes next is in [ROADMAP.md](ROADMAP.md).
 
 ### Full history
 
